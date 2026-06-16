@@ -175,6 +175,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [bulkError, setBulkError] = useState('');
   const [bulkSuccess, setBulkSuccess] = useState('');
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [disableBulkTracking, setDisableBulkTracking] = useState(false);
 
   // Apply Theme Toggle Class
   useEffect(() => {
@@ -352,7 +353,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           body: bulkBody,
           service: bulkService,
           gmailConfig: bulkService === 'gmail' ? { user: bulkGmailUser, pass: bulkGmailPass } : undefined,
-          userId: user.id
+          userId: user.id,
+          disableTracking: disableBulkTracking
         })
       });
 
@@ -1744,6 +1746,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                   </div>
                 </div>
               )}
+
+              <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                  <input
+                    type="checkbox"
+                    checked={disableBulkTracking}
+                    onChange={(e) => setDisableBulkTracking(e.target.checked)}
+                    disabled={bulkSending}
+                  />
+                  Disable email tracking (Highly recommended to land in Primary Inbox instead of Promotions)
+                </label>
+              </div>
 
               <div className="form-group">
                 <label className="form-label">Subject</label>

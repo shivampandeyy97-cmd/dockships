@@ -38,6 +38,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [disableTracking, setDisableTracking] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,7 +71,8 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
           body,
           service,
           gmailConfig: service === 'gmail' ? { user: gmailUser, pass: gmailPass } : undefined,
-          userId
+          userId,
+          disableTracking
         })
       });
 
@@ -227,6 +229,18 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
               onChange={(e) => setBody(e.target.value)}
               disabled={loading}
             />
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              <input
+                type="checkbox"
+                checked={disableTracking}
+                onChange={(e) => setDisableTracking(e.target.checked)}
+                disabled={loading}
+              />
+              Disable email tracking (Highly recommended to land in Primary Inbox instead of Promotions)
+            </label>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1.5rem' }}>

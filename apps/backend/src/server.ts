@@ -436,7 +436,7 @@ app.delete('/api/leads', async (req, res) => {
 // SEND outreach email with open/click tracking injection
 app.post('/api/leads/:id/send-email', async (req, res) => {
   const { id } = req.params;
-  const { recipientEmail, subject, body, service, gmailConfig, userId } = req.body;
+  const { recipientEmail, subject, body, service, gmailConfig, userId, disableTracking } = req.body;
 
   if (!recipientEmail || !subject || !body || !userId) {
     return res.status(400).json({ error: 'Recipient email, subject, body, and user credentials are required.' });
@@ -448,15 +448,19 @@ app.post('/api/leads/:id/send-email', async (req, res) => {
     
     // 1. Rewrite HTML links inside the email body for click tracking
     let trackedBody = body;
-    trackedBody = trackedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
-      if (url.startsWith('http')) {
-        return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
-      }
-      return match;
-    });
+    if (!disableTracking) {
+      trackedBody = trackedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
+        if (url.startsWith('http')) {
+          return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
+        }
+        return match;
+      });
+    }
 
     // 2. Append open tracking pixel
-    const htmlWithPixel = trackedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
+    const htmlWithPixel = disableTracking 
+      ? trackedBody 
+      : trackedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
 
     const mailResult = await sendOutreachEmail({
       to: recipientEmail.trim(),
@@ -842,7 +846,7 @@ app.delete('/api/drafts/:id', async (req, res) => {
 
 // POST Bulk email sending
 app.post('/api/leads/bulk-email', async (req, res) => {
-  const { leadIds, subject, body, service, gmailConfig, userId } = req.body;
+  const { leadIds, subject, body, service, gmailConfig, userId, disableTracking } = req.body;
 
   if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
     return res.status(400).json({ error: 'Array of lead IDs is required.' });
@@ -884,15 +888,19 @@ app.post('/api/leads/bulk-email', async (req, res) => {
         const logId = crypto.randomUUID();
 
         // 1. Rewrite HTML links inside the email body for click tracking
-        replacedBody = replacedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
-          if (url.startsWith('http')) {
-            return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
-          }
-          return match;
-        });
+        if (!disableTracking) {
+          replacedBody = replacedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
+            if (url.startsWith('http')) {
+              return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
+            }
+            return match;
+          });
+        }
 
         // 2. Append open tracking pixel
-        const htmlWithPixel = replacedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
+        const htmlWithPixel = disableTracking 
+          ? replacedBody 
+          : replacedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
 
         const mailResult = await sendOutreachEmail({
           to: recipient.trim(),
