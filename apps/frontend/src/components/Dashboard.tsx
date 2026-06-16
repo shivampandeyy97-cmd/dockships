@@ -724,7 +724,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         </div>
         
         {/* Navigation tabs */}
-        <nav style={{ display: 'flex', gap: '0.5rem' }}>
+        <nav className="app-nav">
           <button 
             className={`btn ${activeTab === 'leads' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('leads')}
@@ -784,22 +784,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         <div className="dashboard-grid">
           {/* Sidebar */}
           <aside style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-            {/* Stats */}
-            <div className="glass-panel stat-card-container">
-              <div className="stat-card">
-                <div className="stat-value">{totalLeads}</div>
-                <div className="stat-label">Total Leads</div>
-              </div>
-              <div className="stat-card" style={{ borderLeft: '1px solid var(--card-border)', borderRight: '1px solid var(--card-border)' }}>
-                <div className="stat-value" style={{ color: 'var(--success)' }}>{activeDomains}</div>
-                <div className="stat-label">Active Sites</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-value" style={{ color: 'var(--primary)' }}>{emailsCollected}</div>
-                <div className="stat-label">Emails</div>
-              </div>
-            </div>
-
             {/* Add Target */}
             <div className="glass-panel" style={{ padding: '1.5rem' }}>
               <h2 className="card-title">Add Target Lead</h2>
@@ -887,9 +871,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           </aside>
 
           {/* Table */}
-          <main className="glass-panel leads-list">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-              <h2 className="card-title" style={{ margin: 0 }}>Active Targets Tracker</h2>
+          <main style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', minWidth: 0 }}>
+            {/* Stats */}
+            <div className="stat-card-container">
+              <div className="glass-panel stat-card">
+                <div className="stat-value">{totalLeads}</div>
+                <div className="stat-label">Total Leads</div>
+              </div>
+              <div className="glass-panel stat-card">
+                <div className="stat-value" style={{ color: 'var(--success)' }}>{activeDomains}</div>
+                <div className="stat-label">Active Sites</div>
+              </div>
+              <div className="glass-panel stat-card">
+                <div className="stat-value" style={{ color: 'var(--primary)' }}>{emailsCollected}</div>
+                <div className="stat-label">Emails</div>
+              </div>
+            </div>
+
+            {/* Leads List */}
+            <div className="glass-panel leads-list">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
+                <h2 className="card-title" style={{ margin: 0 }}>Active Targets Tracker</h2>
               <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                 {selectedCount > 0 && (
                   <>
@@ -981,7 +983,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                               href={`https://${lead.website}`} 
                               target="_blank" 
                               rel="noopener noreferrer"
-                              style={{ color: 'white', textDecoration: 'none' }}
+                              className="lead-link"
                             >
                               {lead.website} <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>↗</span>
                             </a>
@@ -1146,6 +1148,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                 </table>
               </div>
             )}
+            </div>
           </main>
         </div>
       )}
@@ -1378,7 +1381,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
             {/* Conditionally Render SMTP Fields */}
             {activeService === 'smtp' && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '1.5rem' }}>
+              <div className="settings-form-grid">
                 <div className="form-group" style={{ marginBottom: 0 }}>
                   <label className="form-label" htmlFor="smtp-host">SMTP Host</label>
                   <input
@@ -1439,7 +1442,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
             {/* Conditionally Render Mailgun Fields */}
             {activeService === 'mailgun' && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '1.5rem' }}>
+              <div className="settings-form-grid">
                 <div className="form-group" style={{ marginBottom: 0 }}>
                   <label className="form-label" htmlFor="mailgun-domain">Mailgun Domain</label>
                   <input
@@ -1471,7 +1474,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             )}
 
             {/* Global Sender Identity (Required for both SMTP and Mailgun) */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+            <div className="settings-form-grid" style={{ marginBottom: 0 }}>
               <div className="form-group">
                 <label className="form-label" htmlFor="smtp-sender-name">Sender Display Name</label>
                 <input
@@ -1535,7 +1538,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             like <code>{"{{website}}"}</code> for the target domain and <code>{"{{poc}}"}</code> for the point of contact name.
           </p>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '2rem' }}>
+          <div className="templates-grid">
             {/* Sidebar list of templates */}
             <div className="glass-panel" style={{ padding: '1rem', height: 'fit-content' }}>
               <h3 style={{ fontSize: '1rem', marginBottom: '1rem', fontWeight: 600 }}>Saved Templates</h3>
@@ -1651,7 +1654,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       {/* Bulk Outreach Modal */}
       {showBulkModal && (
         <div className="modal-overlay">
-          <div className="modal-content glass-panel animate-fade" style={{ background: '#0f172a', width: '700px', maxWidth: '95%' }}>
+          <div className="modal-content glass-panel bulk-modal-content animate-fade">
             <div className="modal-header">
               <h2 className="card-title" style={{ margin: 0 }}>Bulk Outreach Composer ({selectedCount} target leads)</h2>
               <button className="close-btn" onClick={() => setShowBulkModal(false)} disabled={bulkSending}>&times;</button>
@@ -1715,7 +1718,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
               {bulkService === 'gmail' && (
                 <div className="glass-panel" style={{ padding: '1rem', marginBottom: '1.25rem', background: 'rgba(255,255,255,0.02)' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                  <div className="settings-form-grid" style={{ gap: '1rem', marginBottom: 0 }}>
                     <div className="form-group" style={{ marginBottom: 0 }}>
                       <label className="form-label" style={{ fontSize: '0.75rem' }}>Gmail Account</label>
                       <input

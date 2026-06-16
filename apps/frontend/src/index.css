@@ -201,6 +201,7 @@ body {
 .user-profile {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 1rem;
 }
 
@@ -366,15 +367,23 @@ body {
   color: var(--text-bright);
 }
 
-.stats-card-container {
+.stat-card-container {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
+  gap: 1.5rem;
   margin-bottom: 1.5rem;
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  .stat-card-container {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
 }
 
 .stat-card {
-  padding: 1rem;
+  padding: 1.5rem 1rem;
   text-align: center;
 }
 
@@ -554,4 +563,57 @@ tr:hover td {
 
 :root.light-theme .geo-badge {
   background: rgba(0, 0, 0, 0.03);
+}
+
+/* Responsive navigation and inputs */
+.app-nav {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.lead-link {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 600;
+  transition: color 0.2s ease;
+}
+
+.lead-link:hover {
+  color: var(--primary-hover);
+  text-decoration: underline;
+}
+
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+@media (max-width: 640px) {
+  .settings-form-grid {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+}
+
+.templates-grid {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 2rem;
+  width: 100%;
+}
+
+@media (max-width: 1024px) {
+  .templates-grid {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+}
+
+.bulk-modal-content {
+  width: 700px !important;
+  max-width: 95% !important;
 }

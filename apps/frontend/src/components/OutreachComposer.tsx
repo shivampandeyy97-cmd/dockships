@@ -101,7 +101,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
 
   return (
     <div className="modal-overlay">
-      <div className="modal-content glass-panel animate-fade" style={{ background: '#0f172a' }}>
+      <div className="modal-content glass-panel animate-fade">
         <div className="modal-header">
           <h2 className="card-title" style={{ margin: 0 }}>Outreach Composer: {lead.website}</h2>
           <button className="close-btn" onClick={onClose} disabled={loading}>&times;</button>
