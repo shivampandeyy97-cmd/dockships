@@ -436,53 +436,75 @@ app.delete('/api/leads', async (req, res) => {
 // SEND outreach email with open/click tracking injection
 app.post('/api/leads/:id/send-email', async (req, res) => {
   const { id } = req.params;
-  const { recipientEmail, subject, body, service, gmailConfig, userId, disableTracking } = req.body;
+  const { recipientEmails, recipientEmail, subject, body, service, gmailConfig, userId, disableTracking } = req.body;
 
-  if (!recipientEmail || !subject || !body || !userId) {
-    return res.status(400).json({ error: 'Recipient email, subject, body, and user credentials are required.' });
+  // Backward compatibility: resolve array of recipients
+  const recipients: string[] = Array.isArray(recipientEmails) 
+    ? recipientEmails 
+    : (recipientEmail ? [recipientEmail] : []);
+
+  if (recipients.length === 0 || !subject || !body || !userId) {
+    return res.status(400).json({ error: 'Recipient email(s), subject, body, and user credentials are required.' });
   }
 
   try {
-    const logId = crypto.randomUUID();
+    const results = [];
     const backendUrl = req.protocol + '://' + req.get('host');
-    
-    // 1. Rewrite HTML links inside the email body for click tracking
-    let trackedBody = body;
-    if (!disableTracking) {
-      trackedBody = trackedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
-        if (url.startsWith('http')) {
-          return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
+
+    for (const recipient of recipients) {
+      try {
+        const logId = crypto.randomUUID();
+        
+        // 1. Rewrite HTML links inside the email body for click tracking
+        let trackedBody = body;
+        if (!disableTracking) {
+          trackedBody = trackedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
+            if (url.startsWith('http')) {
+              return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
+            }
+            return match;
+          });
         }
-        return match;
-      });
+
+        // 2. Append open tracking pixel
+        const htmlWithPixel = disableTracking 
+          ? trackedBody 
+          : trackedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
+
+        const mailResult = await sendOutreachEmail({
+          to: recipient.trim(),
+          subject: subject.trim(),
+          body: htmlWithPixel,
+          service,
+          gmailConfig
+        }, userId);
+
+        if (mailResult.success) {
+          await runQuery(
+            `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status)
+             VALUES (?, ?, ?, ?, ?, 'sent')`,
+            [logId, id, recipient.trim(), subject.trim(), trackedBody]
+          );
+          results.push({ email: recipient, success: true, messageId: mailResult.messageId });
+        } else {
+          results.push({ email: recipient, success: false, error: mailResult.error || 'Failed to send.' });
+        }
+      } catch (err: any) {
+        results.push({ email: recipient, success: false, error: err.message });
+      }
     }
 
-    // 2. Append open tracking pixel
-    const htmlWithPixel = disableTracking 
-      ? trackedBody 
-      : trackedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
-
-    const mailResult = await sendOutreachEmail({
-      to: recipientEmail.trim(),
-      subject: subject.trim(),
-      body: htmlWithPixel,
-      service,
-      gmailConfig
-    }, userId);
-
-    if (!mailResult.success) {
-      return res.status(500).json({ error: mailResult.error || 'Outreach dispatch failed.' });
+    const atLeastOneSuccess = results.some(r => r.success);
+    if (atLeastOneSuccess) {
+      await runQuery("UPDATE dockships_leads SET status = 'outreach_sent' WHERE id = ?", [id]);
     }
 
-    await runQuery(
-      `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status)
-       VALUES (?, ?, ?, ?, ?, 'sent')`,
-      [logId, id, recipientEmail.trim(), subject.trim(), trackedBody]
-    );
+    const failed = results.filter(r => !r.success);
+    if (failed.length === results.length) {
+      return res.status(500).json({ error: 'Outreach dispatch failed for all recipients.', details: failed });
+    }
 
-    await runQuery("UPDATE dockships_leads SET status = 'outreach_sent' WHERE id = ?", [id]);
-
-    return res.json({ success: true, messageId: mailResult.messageId });
+    return res.json({ success: true, results });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Internal outreach error.' });
   }
@@ -799,6 +821,99 @@ async function runBackgroundCrawl(leadId: string, websiteUrl: string) {
     console.error(`[Background CRAWL] failed for ${leadId}:`, err.message);
   }
 }
+
+// POST manual email to a lead
+app.post('/api/leads/:id/emails', async (req, res) => {
+  const { id } = req.params;
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: 'Email address is required.' });
+  }
+
+  try {
+    const lead = await getRow<any>('SELECT fetched_emails, manual_email FROM dockships_leads WHERE id = ?', [id]);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    
+    // Check if it matches manual_email
+    if (lead.manual_email?.toLowerCase() === cleanEmail) {
+      return res.status(400).json({ error: 'Email already exists in lead.' });
+    }
+
+    // Append to fetched_emails list if not already there
+    const emailsList: string[] = JSON.parse(lead.fetched_emails || '[]');
+    if (emailsList.map(e => e.toLowerCase()).includes(cleanEmail)) {
+      return res.status(400).json({ error: 'Email already exists in lead.' });
+    }
+
+    emailsList.push(cleanEmail);
+    await runQuery(
+      'UPDATE dockships_leads SET fetched_emails = ? WHERE id = ?',
+      [JSON.stringify(emailsList), id]
+    );
+
+    const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
+    return res.json(updated);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to add email.' });
+  }
+});
+
+// DELETE individual email from a lead (manual or crawled)
+app.delete('/api/leads/:id/emails', async (req, res) => {
+  const { id } = req.params;
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: 'Email to delete is required.' });
+  }
+
+  try {
+    const lead = await getRow<any>('SELECT fetched_emails, manual_email FROM dockships_leads WHERE id = ?', [id]);
+    if (!lead) {
+      return res.status(404).json({ error: 'Lead not found.' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    let updatedManualEmail = lead.manual_email;
+    let updatedFetchedEmails = JSON.parse(lead.fetched_emails || '[]');
+
+    if (lead.manual_email?.toLowerCase() === cleanEmail) {
+      updatedManualEmail = null;
+    }
+
+    updatedFetchedEmails = updatedFetchedEmails.filter((e: string) => e.toLowerCase() !== cleanEmail);
+
+    await runQuery(
+      'UPDATE dockships_leads SET manual_email = ?, fetched_emails = ? WHERE id = ?',
+      [updatedManualEmail, JSON.stringify(updatedFetchedEmails), id]
+    );
+
+    const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
+    return res.json(updated);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete email.' });
+  }
+});
+
+// PATCH manual POC Name for a lead
+app.patch('/api/leads/:id/poc', async (req, res) => {
+  const { id } = req.params;
+  const { pocName } = req.body;
+
+  try {
+    await runQuery(
+      'UPDATE dockships_leads SET poc_name = ? WHERE id = ?',
+      [pocName ? pocName.trim() : null, id]
+    );
+    const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
+    return res.json(updated);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to update POC name.' });
+  }
+});
 
 // GET all drafts
 app.get('/api/drafts', async (req, res) => {

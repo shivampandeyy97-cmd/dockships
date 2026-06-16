@@ -14,15 +14,141 @@ export interface SimilarWebData {
  * Connects to an existing Chrome instance on port 9222 via its WebSocket endpoint
  * or launches a new browser instance as a fallback.
  */
+function extractMetricsFromJson(jsonResult: any): SimilarWebData | null {
+  if (!jsonResult || jsonResult.error) return null;
+  
+  // 1. Visits
+  let visits = 0;
+  if (jsonResult.Engagments && typeof jsonResult.Engagments.Visits !== 'undefined') {
+    visits = jsonResult.Engagments.Visits;
+  } else if (jsonResult.Engagments && typeof jsonResult.Engagments.MonthlyVisits !== 'undefined') {
+    visits = jsonResult.Engagments.MonthlyVisits;
+  } else if (typeof jsonResult.TotalVisits !== 'undefined') {
+    visits = jsonResult.TotalVisits;
+  }
+
+  // 2. Pages Per Visit
+  let pagesPerVisit = 1.0;
+  if (jsonResult.Engagments) {
+    const eng = jsonResult.Engagments;
+    pagesPerVisit = eng.PagePerVisit || eng.PagesPerVisit || eng.PageViews || 1.0;
+  }
+
+  // 3. Country / Global Main Country
+  let country = 'Unknown';
+  if (jsonResult.Country && jsonResult.Country.Name) {
+    country = jsonResult.Country.Name;
+  } else if (jsonResult.CountryRank && jsonResult.CountryRank.Name) {
+    country = jsonResult.CountryRank.Name;
+  }
+
+  // 4. Top 5 GEOS & Traffic Shares
+  const topGeos: Array<{ name: string; share: number }> = [];
+  if (Array.isArray(jsonResult.TopCountryShares)) {
+    // Resolve code -> Name dictionary provided in raw API
+    const countriesList = jsonResult.Countries || [];
+    const countryDict: Record<string | number, string> = {};
+    for (const c of countriesList) {
+      if (c.Code && c.Name) {
+        countryDict[c.Code] = c.Name;
+      }
+    }
+
+    const fallbackDict: Record<string | number, string> = {
+      840: 'United States',
+      826: 'United Kingdom',
+      124: 'Canada',
+      36: 'Australia',
+      276: 'Germany',
+      250: 'France',
+      356: 'India',
+      392: 'Japan',
+      156: 'China',
+      528: 'Netherlands',
+      756: 'Switzerland',
+      724: 'Spain',
+      380: 'Italy',
+      764: 'Thailand',
+      702: 'Singapore',
+      608: 'Philippines',
+      458: 'Malaysia'
+    };
+
+    const shares = jsonResult.TopCountryShares.slice(0, 5);
+    for (const item of shares) {
+      const code = item.Country;
+      const name = countryDict[code] || fallbackDict[code] || item.Name || String(code);
+      const share = item.Share || 0;
+      topGeos.push({ name, share });
+    }
+  }
+
+  // Primary Country fallback if topGeos contains it
+  if (country === 'Unknown' && topGeos.length > 0) {
+    country = topGeos[0].name;
+  }
+
+  const totalTraffic = visits * pagesPerVisit;
+
+  console.log(`[SimilarWeb Scraper] Scrape success: Visits=${visits}, PagesPerVisit=${pagesPerVisit}, TotalTraffic=${totalTraffic}, Geos=${topGeos.length}`);
+  return {
+    visits,
+    pagesPerVisit,
+    totalTraffic,
+    topGeos,
+    country
+  };
+}
+
+/**
+ * Scrapes SimilarWeb details for a domain.
+ * Connects to an existing Chrome instance on port 9222 via its WebSocket endpoint
+ * or launches a new browser instance as a fallback.
+ * Routes through Web Scraping APIs (ScraperAPI / ZenRows) if keys are provided in .env.
+ */
 export async function fetchSimilarWebDetails(domain: string): Promise<SimilarWebData | null> {
   const cleanDomain = domain.trim().toLowerCase().replace(/^https?:\/\//i, '');
+
+  // 1. Try Web Scraping API (ScraperAPI or ZenRows) if configured
+  const scraperApiKey = process.env.SCRAPERAPI_KEY || process.env.SCRAPING_API_KEY;
+  const zenrowsApiKey = process.env.ZENROWS_API_KEY;
+
+  if (scraperApiKey || zenrowsApiKey) {
+    console.log(`[SimilarWeb Scraper] Requesting SimilarWeb same-origin API data via scraping proxy for: ${cleanDomain}`);
+    const targetUrl = `https://data.similarweb.com/api/v1/data?domain=${cleanDomain}`;
+    let proxyUrl = '';
+    if (zenrowsApiKey) {
+      proxyUrl = `https://api.zenrows.com/v1/?apikey=${zenrowsApiKey}&url=${encodeURIComponent(targetUrl)}`;
+    } else {
+      proxyUrl = `http://api.scraperapi.com?api_key=${scraperApiKey}&url=${encodeURIComponent(targetUrl)}`;
+    }
+
+    try {
+      const response = await axios.get(proxyUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': `https://www.similarweb.com/website/${cleanDomain}/`
+        },
+        timeout: 30000
+      });
+      const parsed = extractMetricsFromJson(response.data);
+      if (parsed) {
+        console.log(`[SimilarWeb Scraper API] Scraped successfully via scraping proxy API for ${cleanDomain}`);
+        return parsed;
+      }
+    } catch (err: any) {
+      console.warn(`[SimilarWeb Scraper API] Direct API call via scraping proxy failed for ${cleanDomain}:`, err.message);
+    }
+  }
+
+  // 2. Puppeteer Fallback
   let browser: any = null;
   let wasConnected = false;
 
-  console.log(`[SimilarWeb Scraper] Connecting to Chrome for: ${cleanDomain}`);
+  console.log(`[SimilarWeb Scraper] Connecting to Chrome for: ${cleanDomain} (Puppeteer Fallback)`);
 
   try {
-    // 1. Stable remote debugging lookup
+    // Stable remote debugging lookup
     const versionResponse = await axios.get('http://127.0.0.1:9222/json/version', { timeout: 2000 });
     const wsDebuggerUrl = versionResponse.data.webSocketDebuggerUrl;
     
@@ -78,90 +204,10 @@ export async function fetchSimilarWebDetails(domain: string): Promise<SimilarWeb
       }
     }, cleanDomain);
 
-    await page.close();
-
-    if (jsonResult && !jsonResult.error) {
-      // 1. Visits
-      let visits = 0;
-      if (jsonResult.Engagments && typeof jsonResult.Engagments.Visits !== 'undefined') {
-        visits = jsonResult.Engagments.Visits;
-      } else if (jsonResult.Engagments && typeof jsonResult.Engagments.MonthlyVisits !== 'undefined') {
-        visits = jsonResult.Engagments.MonthlyVisits;
-      } else if (typeof jsonResult.TotalVisits !== 'undefined') {
-        visits = jsonResult.TotalVisits;
-      }
-
-      // 2. Pages Per Visit
-      let pagesPerVisit = 1.0;
-      if (jsonResult.Engagments) {
-        const eng = jsonResult.Engagments;
-        pagesPerVisit = eng.PagePerVisit || eng.PagesPerVisit || eng.PageViews || 1.0;
-      }
-
-      // 3. Country / Global Main Country
-      let country = 'Unknown';
-      if (jsonResult.Country && jsonResult.Country.Name) {
-        country = jsonResult.Country.Name;
-      } else if (jsonResult.CountryRank && jsonResult.CountryRank.Name) {
-        country = jsonResult.CountryRank.Name;
-      }
-
-      // 4. Top 5 GEOS & Traffic Shares
-      const topGeos: Array<{ name: string; share: number }> = [];
-      if (Array.isArray(jsonResult.TopCountryShares)) {
-        // Resolve code -> Name dictionary provided in raw API
-        const countriesList = jsonResult.Countries || [];
-        const countryDict: Record<string | number, string> = {};
-        for (const c of countriesList) {
-          if (c.Code && c.Name) {
-            countryDict[c.Code] = c.Name;
-          }
-        }
-
-        const fallbackDict: Record<string | number, string> = {
-          840: 'United States',
-          826: 'United Kingdom',
-          124: 'Canada',
-          36: 'Australia',
-          276: 'Germany',
-          250: 'France',
-          356: 'India',
-          392: 'Japan',
-          156: 'China',
-          528: 'Netherlands',
-          756: 'Switzerland',
-          724: 'Spain',
-          380: 'Italy',
-          764: 'Thailand',
-          702: 'Singapore',
-          608: 'Philippines',
-          458: 'Malaysia'
-        };
-
-        const shares = jsonResult.TopCountryShares.slice(0, 5);
-        for (const item of shares) {
-          const code = item.Country;
-          const name = countryDict[code] || fallbackDict[code] || item.Name || String(code);
-          const share = item.Share || 0;
-          topGeos.push({ name, share });
-        }
-      }
-
-      // Primary Country fallback if topGeos contains it
-      if (country === 'Unknown' && topGeos.length > 0) {
-        country = topGeos[0].name;
-      }
-
-      const totalTraffic = visits * pagesPerVisit;
-
-      console.log(`[SimilarWeb Scraper] Scrape success: Visits=${visits}, PagesPerVisit=${pagesPerVisit}, TotalTraffic=${totalTraffic}, Geos=${topGeos.length}`);
-      return {
-        visits,
-        pagesPerVisit,
-        totalTraffic,
-        topGeos,
-        country
-      };
+    const parsed = extractMetricsFromJson(jsonResult);
+    if (parsed) {
+      await page.close();
+      return parsed;
     }
 
     console.warn('[SimilarWeb Scraper] Same-origin API call failed. Falling back to DOM parsing...', jsonResult?.error);
@@ -194,6 +240,8 @@ export async function fetchSimilarWebDetails(domain: string): Promise<SimilarWeb
         return { visitsText: '', countryText: '' };
       }
     });
+
+    await page.close();
 
     if (domDetails.visitsText || domDetails.countryText) {
       let visits = 0;

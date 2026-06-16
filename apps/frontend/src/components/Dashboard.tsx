@@ -177,6 +177,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [disableBulkTracking, setDisableBulkTracking] = useState(false);
 
+  // Editing POC states
+  const [editingPocLeadId, setEditingPocLeadId] = useState<string | null>(null);
+  const [pocNameEditVal, setPocNameEditVal] = useState('');
+
   // Apply Theme Toggle Class
   useEffect(() => {
     if (theme === 'light') {
@@ -576,21 +580,60 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     reader.readAsText(file);
   };
 
-  const handleOverrideStatus = async (emailId: string, status: string) => {
+  const handleSavePocName = async (leadId: string, pocName: string) => {
     try {
-      const response = await fetch(`${API_URL}/api/emails/${emailId}/status`, {
+      const response = await fetch(`${API_URL}/api/leads/${leadId}/poc`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status })
+        body: JSON.stringify({ pocName })
       });
-      if (response.ok) {
-        fetchLogs();
-        fetchLeads();
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to update POC name.');
       }
-    } catch (e) {
-      console.error('Error updating log status:', e);
+      setLeads(prevLeads => prevLeads.map(l => l.id === leadId ? data : l));
+      setEditingPocLeadId(null);
+    } catch (err: any) {
+      alert(err.message || 'Failed to update POC name.');
     }
   };
+
+  const handleAddEmail = async (leadId: string, email: string) => {
+    try {
+      const response = await fetch(`${API_URL}/api/leads/${leadId}/emails`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to add email.');
+      }
+      setLeads(prevLeads => prevLeads.map(l => l.id === leadId ? data : l));
+    } catch (err: any) {
+      alert(err.message || 'Failed to add email.');
+    }
+  };
+
+  const handleDeleteEmail = async (leadId: string, email: string) => {
+    if (!window.confirm(`Are you sure you want to delete ${email}?`)) return;
+    try {
+      const response = await fetch(`${API_URL}/api/leads/${leadId}/emails`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to delete email.');
+      }
+      setLeads(prevLeads => prevLeads.map(l => l.id === leadId ? data : l));
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete email.');
+    }
+  };
+
+
 
   const handleSimulateReply = async (email: string) => {
     if (!email) return;
@@ -991,10 +1034,67 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                             </a>
                           </td>
                           <td>
-                            {lead.poc_name ? (
-                              <span style={{ color: 'var(--text-bright)', fontWeight: 500 }}>{lead.poc_name}</span>
+                            {editingPocLeadId === lead.id ? (
+                              <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                                <input
+                                  type="text"
+                                  value={pocNameEditVal}
+                                  onChange={(e) => setPocNameEditVal(e.target.value)}
+                                  className="form-control"
+                                  style={{
+                                    fontSize: '0.8rem',
+                                    padding: '0.2rem 0.4rem',
+                                    width: '120px',
+                                    height: 'auto',
+                                    background: 'var(--input-bg)',
+                                    border: '1px solid var(--input-border)',
+                                    color: 'var(--input-color)',
+                                    borderRadius: '4px'
+                                  }}
+                                  autoFocus
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      handleSavePocName(lead.id, pocNameEditVal);
+                                    } else if (e.key === 'Escape') {
+                                      setEditingPocLeadId(null);
+                                    }
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
+                                  onClick={() => handleSavePocName(lead.id, pocNameEditVal)}
+                                  title="Save"
+                                >
+                                  ✓
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
+                                  onClick={() => setEditingPocLeadId(null)}
+                                  title="Cancel"
+                                >
+                                  ✕
+                                </button>
+                              </div>
                             ) : (
-                              <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>-</span>
+                              <div 
+                                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}
+                                onClick={() => {
+                                  setEditingPocLeadId(lead.id);
+                                  setPocNameEditVal(lead.poc_name || '');
+                                }}
+                                title="Click to edit POC name"
+                              >
+                                {lead.poc_name ? (
+                                  <span style={{ color: 'var(--text-bright)', fontWeight: 500 }}>{lead.poc_name}</span>
+                                ) : (
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>Click to enter</span>
+                                )}
+                                <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>✏️</span>
+                              </div>
                             )}
                           </td>
                           <td>
@@ -1064,12 +1164,90 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                                 emailsList.map((email) => {
                                   const isManual = email === lead.manual_email;
                                   return (
-                                    <span key={email} className="email-tag" style={{ background: isManual ? 'rgba(16, 185, 129, 0.1)' : 'rgba(99, 102, 241, 0.1)', borderColor: isManual ? 'rgba(16, 185, 129, 0.2)' : 'rgba(99, 102, 241, 0.2)' }}>
+                                    <span 
+                                      key={email} 
+                                      className="email-tag" 
+                                      style={{ 
+                                        display: 'inline-flex', 
+                                        alignItems: 'center', 
+                                        gap: '0.25rem',
+                                        background: isManual ? 'rgba(16, 185, 129, 0.1)' : 'rgba(99, 102, 241, 0.1)', 
+                                        borderColor: isManual ? 'rgba(16, 185, 129, 0.2)' : 'rgba(99, 102, 241, 0.2)' 
+                                      }}
+                                    >
                                       {email} {isManual && <small style={{ opacity: 0.7 }}>(man)</small>}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteEmail(lead.id, email)}
+                                        style={{
+                                          background: 'none',
+                                          border: 'none',
+                                          color: 'rgba(239, 68, 68, 0.8)',
+                                          cursor: 'pointer',
+                                          padding: '0 2px',
+                                          fontSize: '0.9rem',
+                                          marginLeft: '2px',
+                                          lineHeight: 1,
+                                          fontWeight: 'bold',
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          height: '14px',
+                                          width: '14px',
+                                          borderRadius: '50%'
+                                        }}
+                                        title="Delete email"
+                                      >
+                                        &times;
+                                      </button>
                                     </span>
                                   );
                                 })
                               )}
+                            </div>
+                            <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                              <input
+                                type="email"
+                                placeholder="Add email..."
+                                style={{
+                                  fontSize: '0.75rem',
+                                  padding: '0.2rem 0.4rem',
+                                  background: 'var(--input-bg)',
+                                  border: '1px solid var(--input-border)',
+                                  borderRadius: '4px',
+                                  color: 'var(--input-color)',
+                                  width: '130px',
+                                  height: '24px'
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    const target = e.currentTarget;
+                                    const val = target.value.trim();
+                                    if (val) {
+                                      handleAddEmail(lead.id, val);
+                                      target.value = '';
+                                    }
+                                  }
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem', height: '24px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                                onClick={(e) => {
+                                  const parent = e.currentTarget.parentElement;
+                                  if (parent) {
+                                    const input = parent.querySelector('input') as HTMLInputElement;
+                                    const val = input.value.trim();
+                                    if (val) {
+                                      handleAddEmail(lead.id, val);
+                                      input.value = '';
+                                    }
+                                  }
+                                }}
+                              >
+                                +
+                              </button>
                             </div>
                           </td>
                           <td>
@@ -1191,41 +1369,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                       <td style={{ fontWeight: 600 }}>{log.recipient_email}</td>
                       <td>{log.subject}</td>
                       <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <span className={`badge ${
-                            log.status === 'reverted' ? 'badge-success' :
-                            log.status === 'clicked' ? 'badge-info' :
-                            log.status === 'opened' ? 'badge-primary' :
-                            log.status === 'delivered' ? 'badge-info' :
-                            log.status === 'bounced' ? 'badge-danger' : 'badge-secondary'
-                          }`} style={{ fontSize: '0.75rem' }}>
-                            {log.status === 'reverted' ? 'Replied' :
-                             log.status === 'clicked' ? 'Clicked' :
-                             log.status === 'opened' ? 'Opened' :
-                             log.status === 'delivered' ? 'Delivered' :
-                             log.status === 'bounced' ? 'Bounced' : 'Sent'}
-                          </span>
-                          <select
-                            value={log.status}
-                            onChange={(e) => handleOverrideStatus(log.id, e.target.value)}
-                            style={{
-                              background: 'var(--input-bg)',
-                              color: 'var(--input-color)',
-                              border: '1px solid var(--input-border)',
-                              borderRadius: '4px',
-                              padding: '0.15rem 0.3rem',
-                              fontSize: '0.75rem',
-                              cursor: 'pointer'
-                            }}
-                          >
-                            <option value="sent">Sent</option>
-                            <option value="delivered">Delivered</option>
-                            <option value="opened">Opened</option>
-                            <option value="clicked">Clicked</option>
-                            <option value="bounced">Bounced</option>
-                            <option value="reverted">Replied/Reverted</option>
-                          </select>
-                        </div>
+                        <span className={`badge ${
+                          log.status === 'reverted' ? 'badge-success' :
+                          log.status === 'clicked' ? 'badge-info' :
+                          log.status === 'opened' ? 'badge-primary' :
+                          log.status === 'delivered' ? 'badge-info' :
+                          log.status === 'bounced' ? 'badge-danger' : 'badge-secondary'
+                        }`} style={{ fontSize: '0.75rem' }}>
+                          {log.status === 'reverted' ? 'Replied' :
+                           log.status === 'clicked' ? 'Clicked' :
+                           log.status === 'opened' ? 'Opened' :
+                           log.status === 'delivered' ? 'Delivered' :
+                           log.status === 'bounced' ? 'Bounced' : 'Sent'}
+                        </span>
                       </td>
                       <td>
                         <div style={{ display: 'flex', gap: '0.4rem' }}>

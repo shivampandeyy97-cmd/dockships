@@ -18,11 +18,14 @@ interface OutreachComposerProps {
 }
 
 export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId, onClose, onSent }) => {
-  const [recipient, setRecipient] = useState(() => {
-    // Prefer manual email first, then first fetched email
-    if (lead.manual_email) return lead.manual_email;
-    if (lead.fetched_emails && lead.fetched_emails.length > 0) return lead.fetched_emails[0];
-    return '';
+  const [tempEmails, setTempEmails] = useState<string[]>([]);
+  const [customEmailInput, setCustomEmailInput] = useState('');
+  const [selectedRecipients, setSelectedRecipients] = useState<string[]>(() => {
+    const initialOptions = [
+      ...(lead.manual_email ? [lead.manual_email] : []),
+      ...(lead.fetched_emails || [])
+    ];
+    return Array.from(new Set(initialOptions));
   });
 
   const [service, setService] = useState<'smtp' | 'gmail'>('smtp');
@@ -42,8 +45,8 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!recipient) {
-      setError('Please provide a recipient email address.');
+    if (selectedRecipients.length === 0) {
+      setError('Please select at least one recipient email address.');
       return;
     }
     if (!subject || !body) {
@@ -66,7 +69,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          recipientEmail: recipient,
+          recipientEmails: selectedRecipients,
           subject,
           body,
           service,
@@ -96,7 +99,8 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
 
   const emailOptions = [
     ...(lead.manual_email ? [lead.manual_email] : []),
-    ...(lead.fetched_emails || [])
+    ...(lead.fetched_emails || []),
+    ...tempEmails
   ];
   // Remove duplicates
   const uniqueEmailOptions = Array.from(new Set(emailOptions));
@@ -181,32 +185,73 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
           )}
 
           <div className="form-group">
-            <label className="form-label">Recipient Email</label>
-            {uniqueEmailOptions.length > 0 ? (
-              <select
-                className="form-control"
-                value={recipient}
-                onChange={(e) => setRecipient(e.target.value)}
-                disabled={loading}
-              >
-                {uniqueEmailOptions.map((mail) => (
-                  <option key={mail} value={mail}>{mail}</option>
-                ))}
-                <option value="">-- Manual Entry --</option>
-              </select>
-            ) : null}
+            <label className="form-label">Recipient Emails</label>
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.5rem',
+              marginBottom: '0.75rem',
+              maxHeight: '150px',
+              overflowY: 'auto',
+              padding: '0.6rem 0.8rem',
+              border: '1px solid var(--input-border)',
+              borderRadius: '8px',
+              background: 'var(--input-bg)'
+            }}>
+              {uniqueEmailOptions.map((mail) => (
+                <label key={mail} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-bright)' }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedRecipients.includes(mail)}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedRecipients([...selectedRecipients, mail]);
+                      } else {
+                        setSelectedRecipients(selectedRecipients.filter((x) => x !== mail));
+                      }
+                    }}
+                    disabled={loading}
+                  />
+                  {mail}
+                </label>
+              ))}
+              {uniqueEmailOptions.length === 0 && (
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                  No contacts found. Use the manual adder below.
+                </span>
+              )}
+            </div>
 
-            {(uniqueEmailOptions.length === 0 || recipient === '') && (
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
               <input
                 type="email"
                 className="form-control"
-                style={{ marginTop: uniqueEmailOptions.length > 0 ? '0.5rem' : '0' }}
-                placeholder="Enter email address manually"
-                value={recipient}
-                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="Add manual email recipient..."
+                value={customEmailInput}
+                onChange={(e) => setCustomEmailInput(e.target.value)}
                 disabled={loading}
               />
-            )}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ padding: '0.375rem 0.75rem', fontSize: '0.85rem', whiteSpace: 'nowrap' }}
+                onClick={() => {
+                  const email = customEmailInput.trim().toLowerCase();
+                  if (email) {
+                    if (!tempEmails.includes(email)) {
+                      setTempEmails([...tempEmails, email]);
+                    }
+                    if (!selectedRecipients.includes(email)) {
+                      setSelectedRecipients([...selectedRecipients, email]);
+                    }
+                    setCustomEmailInput('');
+                  }
+                }}
+                disabled={loading}
+              >
+                Add
+              </button>
+            </div>
           </div>
 
           <div className="form-group">
