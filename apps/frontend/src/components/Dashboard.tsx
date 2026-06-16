@@ -679,7 +679,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           username: smtpUsername,
           password: smtpPassword,
           senderName: smtpSenderName,
-          senderEmail: smtpSenderEmail,
+          senderEmail: activeService === 'mailgun' ? 'contact@rollinhead.com' : smtpSenderEmail,
           mailgunApiKey: mailgunApiKey || undefined,
           mailgunDomain: mailgunDomain || undefined,
           activeService
