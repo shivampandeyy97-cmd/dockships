@@ -129,6 +129,16 @@ export function initializeSchema(): Promise<void> {
           );
         `);
 
+        // Drafts table
+        await runQuery(`
+          CREATE TABLE IF NOT EXISTS dockships_drafts (
+            id TEXT PRIMARY KEY,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+          );
+        `);
+
         // Migration block: Add columns to existing table if they don't exist
         try {
           await runQuery('ALTER TABLE dockships_smtp_settings ADD COLUMN mailgun_api_key TEXT;');
@@ -186,6 +196,20 @@ export function initializeSchema(): Promise<void> {
           }
         } catch (cronErr) {
           console.error('Error seeding cron jobs:', cronErr);
+        }
+
+        // Insert initial drafts if table is empty
+        try {
+          const checkDrafts = await getRow<{ count: number }>('SELECT count(*) as count FROM dockships_drafts');
+          if (checkDrafts && checkDrafts.count === 0) {
+            await runQuery(`
+              INSERT INTO dockships_drafts (id, subject, body)
+              VALUES ('draft-1', 'Outreach Partnership Proposal — {{website}}', '<p>Hello {{poc}},</p>\n<p>I hope you are doing well.</p>\n<p>I visited your website <strong>{{website}}</strong> and really liked your platform. I would love to connect and discuss potential partnership opportunities.</p>\n<p>Best regards,</p>\n<p>Sales Team</p>')
+            `);
+            console.log('Default draft template seeded successfully.');
+          }
+        } catch (draftsErr) {
+          console.error('Error seeding draft templates:', draftsErr);
         }
 
         console.log('Database tables successfully initialized.');

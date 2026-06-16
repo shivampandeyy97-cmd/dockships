@@ -76,10 +76,9 @@ export async function sendOutreachEmail(
     const mailgunApiKey = settings?.mailgun_api_key || process.env.MAILGUN_API_KEY;
     const mailgunDomain = settings?.mailgun_domain || process.env.MAILGUN_DOMAIN;
     const mailgunBaseUrl = process.env.MAILGUN_BASE_URL || 'https://api.mailgun.net';
-    const senderEmail = settings?.sender_email || process.env.DEFAULT_SENDER_EMAIL || 'contact@rollinhead.com';
-    const senderName = settings?.sender_name || 'Dockships Outreach';
-
     const isMailgunActive = settings?.active_service === 'mailgun' || options.service === 'mailgun' || (!settings && !!mailgunApiKey);
+    const senderEmail = isMailgunActive ? 'contact@rollinhead.com' : (settings?.sender_email || process.env.DEFAULT_SENDER_EMAIL || 'contact@rollinhead.com');
+    const senderName = settings?.sender_name || 'Dockships Outreach';
 
     // Subcase 2A: Mailgun API Dispatcher (Active either by user settings, or as default fallback)
     if (isMailgunActive) {

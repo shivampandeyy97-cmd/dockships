@@ -48,6 +48,13 @@ interface CronJob {
   created_at: string;
 }
 
+interface Draft {
+  id: string;
+  subject: string;
+  body: string;
+  created_at: string;
+}
+
 interface DashboardProps {
   user: User;
   onLogout: () => void;
@@ -101,7 +108,7 @@ function parseCSV(text: string) {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'cron'>('leads');
+  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'cron' | 'templates'>('leads');
   
   // Theme state
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -147,6 +154,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [mailgunDomain, setMailgunDomain] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState({ success: '', error: '' });
+
+  // Draft templates states
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [loadingDrafts, setLoadingDrafts] = useState(false);
+  const [selectedDraftForEdit, setSelectedDraftForEdit] = useState<Draft | null>(null);
+  const [draftSubjectInput, setDraftSubjectInput] = useState('');
+  const [draftBodyInput, setDraftBodyInput] = useState('');
+  const [savingDraft, setSavingDraft] = useState(false);
+
+  // Bulk Outreach Modal States
+  const [showBulkModal, setShowBulkModal] = useState(false);
+  const [bulkService, setBulkService] = useState<'smtp' | 'gmail'>('smtp');
+  const [bulkGmailUser, setBulkGmailUser] = useState('');
+  const [bulkGmailPass, setBulkGmailPass] = useState('');
+  const [bulkSubject, setBulkSubject] = useState('');
+  const [bulkBody, setBulkBody] = useState('');
+  const [bulkSending, setBulkSending] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
+  const [bulkError, setBulkError] = useState('');
+  const [bulkSuccess, setBulkSuccess] = useState('');
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
 
   // Apply Theme Toggle Class
   useEffect(() => {
@@ -215,6 +243,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           setSmtpSenderName(data.sender_name || '');
           setSmtpSenderEmail(data.sender_email || '');
           setMailgunDomain(data.mailgun_domain || '');
+          setMailgunApiKey(data.mailgun_api_key ? '••••••••••••••••' : '');
           setActiveService(data.active_service || 'smtp');
         }
       }
@@ -223,9 +252,168 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
+  const fetchDrafts = async () => {
+    setLoadingDrafts(true);
+    try {
+      const response = await fetch(`${API_URL}/api/drafts`);
+      if (response.ok) {
+        const data = await response.json();
+        setDrafts(data);
+      }
+    } catch (e) {
+      console.error('Error loading drafts:', e);
+    } finally {
+      setLoadingDrafts(false);
+    }
+  };
+
+  const handleSaveDraft = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!draftSubjectInput || !draftBodyInput) return;
+
+    setSavingDraft(true);
+    try {
+      const response = await fetch(`${API_URL}/api/drafts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: selectedDraftForEdit?.id || undefined,
+          subject: draftSubjectInput,
+          body: draftBodyInput
+        })
+      });
+
+      if (response.ok) {
+        setDraftSubjectInput('');
+        setDraftBodyInput('');
+        setSelectedDraftForEdit(null);
+        fetchDrafts();
+      }
+    } catch (err) {
+      console.error('Failed to save draft:', err);
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
+  const handleDeleteDraft = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this template?')) return;
+    try {
+      const response = await fetch(`${API_URL}/api/drafts/${id}`, {
+        method: 'DELETE'
+      });
+      if (response.ok) {
+        fetchDrafts();
+        if (selectedDraftForEdit?.id === id) {
+          setSelectedDraftForEdit(null);
+          setDraftSubjectInput('');
+          setDraftBodyInput('');
+        }
+      }
+    } catch (err) {
+      console.error('Error deleting draft:', err);
+    }
+  };
+
+  const handleTemplateChangeForBulk = (templateId: string) => {
+    setSelectedTemplateId(templateId);
+    const selected = drafts.find(d => d.id === templateId);
+    if (selected) {
+      setBulkSubject(selected.subject);
+      setBulkBody(selected.body);
+    } else {
+      setBulkSubject('');
+      setBulkBody('');
+    }
+  };
+
+  const handleSendBulkOutreach = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const selectedIds = Object.keys(selectedLeadIds).filter(id => selectedLeadIds[id]);
+    if (selectedIds.length === 0) return;
+
+    if (bulkService === 'gmail' && (!bulkGmailUser || !bulkGmailPass)) {
+      setBulkError('Please enter Gmail credentials.');
+      return;
+    }
+
+    setBulkSending(true);
+    setBulkError('');
+    setBulkSuccess('');
+    setBulkProgress({ current: 0, total: selectedIds.length });
+
+    try {
+      const response = await fetch(`${API_URL}/api/leads/bulk-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          leadIds: selectedIds,
+          subject: bulkSubject,
+          body: bulkBody,
+          service: bulkService,
+          gmailConfig: bulkService === 'gmail' ? { user: bulkGmailUser, pass: bulkGmailPass } : undefined,
+          userId: user.id
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Bulk outreach failed.');
+      }
+
+      const succeeded = data.results.filter((r: any) => r.success).length;
+      const failed = data.results.filter((r: any) => !r.success).length;
+
+      setBulkSuccess(`Outreach complete! Succeeded: ${succeeded}, Failed: ${failed}.`);
+      setSelectedLeadIds({});
+      fetchLeads();
+      setTimeout(() => {
+        setShowBulkModal(false);
+        setBulkSuccess('');
+      }, 3000);
+    } catch (err: any) {
+      setBulkError(err.message || 'Connection error.');
+    } finally {
+      setBulkSending(false);
+    }
+  };
+
+  const getBulkPreview = () => {
+    const selectedIds = Object.keys(selectedLeadIds).filter(id => selectedLeadIds[id]);
+    if (selectedIds.length === 0) return null;
+    const firstLead = leads.find(l => l.id === selectedIds[0]);
+    if (!firstLead) return null;
+
+    const poc = firstLead.poc_name || 'Team';
+    const previewSubject = bulkSubject
+      .replace(/\{\{website\}\}/g, firstLead.website)
+      .replace(/\{\{poc\}\}/g, poc);
+    const previewBody = bulkBody
+      .replace(/\{\{website\}\}/g, firstLead.website)
+      .replace(/\{\{poc\}\}/g, poc);
+
+    return {
+      website: firstLead.website,
+      poc,
+      subject: previewSubject,
+      body: previewBody
+    };
+  };
+
+  // Populate first template in bulk form if drafts change
+  useEffect(() => {
+    if (drafts.length > 0 && !selectedTemplateId) {
+      const first = drafts[0];
+      setSelectedTemplateId(first.id);
+      setBulkSubject(first.subject);
+      setBulkBody(first.body);
+    }
+  }, [drafts, selectedTemplateId]);
+
   useEffect(() => {
     fetchLeads();
     fetchSmtpSettings();
+    fetchDrafts();
     
     const interval = setInterval(fetchLeads, 5000);
     return () => clearInterval(interval);
@@ -236,6 +424,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       fetchLogs();
     } else if (activeTab === 'cron') {
       fetchCronJobs();
+    } else if (activeTab === 'templates') {
+      fetchDrafts();
     }
   }, [activeTab]);
 
@@ -543,6 +733,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             🎯 Targets Dashboard
           </button>
           <button 
+            className={`btn ${activeTab === 'templates' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setActiveTab('templates')}
+            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+          >
+            📝 Draft Templates
+          </button>
+          <button 
             className={`btn ${activeTab === 'logs' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('logs')}
             style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
@@ -695,13 +892,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
               <h2 className="card-title" style={{ margin: 0 }}>Active Targets Tracker</h2>
               <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                 {selectedCount > 0 && (
-                  <button 
-                    className="btn btn-danger animate-fade" 
-                    onClick={handleBulkDelete}
-                    style={{ padding: '0.45rem 1rem', fontSize: '0.85rem', background: '#ef4444', borderColor: '#ef4444' }}
-                  >
-                    🗑️ Delete Selected ({selectedCount})
-                  </button>
+                  <>
+                    <button 
+                      className="btn btn-primary animate-fade" 
+                      onClick={() => setShowBulkModal(true)}
+                      style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}
+                    >
+                      ✉️ Bulk Outreach ({selectedCount})
+                    </button>
+                    <button 
+                      className="btn btn-danger animate-fade" 
+                      onClick={handleBulkDelete}
+                      style={{ padding: '0.45rem 1rem', fontSize: '0.85rem', background: '#ef4444', borderColor: '#ef4444' }}
+                    >
+                      🗑️ Delete Selected ({selectedCount})
+                    </button>
+                  </>
                 )}
                 <button className="btn btn-secondary" onClick={fetchLeads} disabled={loadingLeads} style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}>
                   Refresh
@@ -1286,11 +1492,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                   type="email"
                   className="form-control"
                   placeholder="e.g. outreach@mybusiness.com"
-                  value={smtpSenderEmail}
+                  value={activeService === 'mailgun' ? 'contact@rollinhead.com' : smtpSenderEmail}
                   onChange={(e) => setSmtpSenderEmail(e.target.value)}
-                  disabled={savingSettings}
+                  disabled={savingSettings || activeService === 'mailgun'}
                   required
                 />
+                {activeService === 'mailgun' && (
+                  <span style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '0.25rem', display: 'block' }}>
+                    🔒 Forced to contact@rollinhead.com for Mailgun domain compliance.
+                  </span>
+                )}
               </div>
             </div>
 
@@ -1303,6 +1514,130 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         </main>
       )}
 
+      {/* Draft Templates Tab */}
+      {activeTab === 'templates' && (
+        <main className="glass-panel" style={{ padding: '2rem', minHeight: '450px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+            <h2 className="card-title" style={{ margin: 0 }}>📝 Draft Email Templates</h2>
+            <button 
+              className="btn btn-primary"
+              onClick={() => {
+                setSelectedDraftForEdit(null);
+                setDraftSubjectInput('');
+                setDraftBodyInput('');
+              }}
+            >
+              ➕ Create New Template
+            </button>
+          </div>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
+            Create and save email draft templates for your target website outreach campaigns. You can use dynamic placeholders 
+            like <code>{"{{website}}"}</code> for the target domain and <code>{"{{poc}}"}</code> for the point of contact name.
+          </p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '2rem' }}>
+            {/* Sidebar list of templates */}
+            <div className="glass-panel" style={{ padding: '1rem', height: 'fit-content' }}>
+              <h3 style={{ fontSize: '1rem', marginBottom: '1rem', fontWeight: 600 }}>Saved Templates</h3>
+              {loadingDrafts && drafts.length === 0 ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading templates...</div>
+              ) : drafts.length === 0 ? (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic' }}>No templates saved.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {drafts.map(d => (
+                    <div 
+                      key={d.id} 
+                      style={{ 
+                        padding: '0.75rem', 
+                        borderRadius: '8px', 
+                        background: selectedDraftForEdit?.id === d.id ? 'var(--primary-glow)' : 'rgba(255,255,255,0.02)',
+                        border: `1px solid ${selectedDraftForEdit?.id === d.id ? 'var(--primary)' : 'var(--card-border)'}`,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}
+                      onClick={() => {
+                        setSelectedDraftForEdit(d);
+                        setDraftSubjectInput(d.subject);
+                        setDraftBodyInput(d.body);
+                      }}
+                    >
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '200px' }}>
+                        <strong style={{ fontSize: '0.85rem', color: 'var(--text-bright)' }}>{d.subject}</strong>
+                      </div>
+                      <button 
+                        className="btn btn-danger" 
+                        style={{ padding: '0.2rem 0.4rem', fontSize: '0.7rem', background: '#ef4444', borderColor: '#ef4444' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteDraft(d.id);
+                        }}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Template Editor */}
+            <div className="glass-panel" style={{ padding: '1.5rem' }}>
+              <h3 style={{ fontSize: '1.1rem', marginBottom: '1.25rem', fontWeight: 700 }}>
+                {selectedDraftForEdit ? 'Edit Template' : 'New Template'}
+              </h3>
+              <form onSubmit={handleSaveDraft}>
+                <div className="form-group">
+                  <label className="form-label" htmlFor="draft-subject">Email Subject</label>
+                  <input
+                    id="draft-subject"
+                    type="text"
+                    className="form-control"
+                    placeholder="e.g. Partnership Proposal for {{website}}"
+                    value={draftSubjectInput}
+                    onChange={(e) => setDraftSubjectInput(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label" htmlFor="draft-body">Email Body (HTML format)</label>
+                  <textarea
+                    id="draft-body"
+                    className="form-control"
+                    style={{ minHeight: '220px', resize: 'vertical' }}
+                    placeholder="<p>Hello {{poc}},</p>..."
+                    value={draftBodyInput}
+                    onChange={(e) => setDraftBodyInput(e.target.value)}
+                    required
+                  />
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1.5rem' }}>
+                  {selectedDraftForEdit && (
+                    <button 
+                      type="button" 
+                      className="btn btn-secondary" 
+                      onClick={() => {
+                        setSelectedDraftForEdit(null);
+                        setDraftSubjectInput('');
+                        setDraftBodyInput('');
+                      }}
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
+                  <button type="submit" className="btn btn-primary" disabled={savingDraft}>
+                    {savingDraft ? 'Saving...' : 'Save Template'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </main>
+      )}
+
       {/* Modal Outreach Composer */}
       {activeLeadForOutreach && (
         <OutreachComposer
@@ -1311,6 +1646,172 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           onClose={() => setActiveLeadForOutreach(null)}
           onSent={fetchLeads}
         />
+      )}
+
+      {/* Bulk Outreach Modal */}
+      {showBulkModal && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel animate-fade" style={{ background: '#0f172a', width: '700px', maxWidth: '95%' }}>
+            <div className="modal-header">
+              <h2 className="card-title" style={{ margin: 0 }}>Bulk Outreach Composer ({selectedCount} target leads)</h2>
+              <button className="close-btn" onClick={() => setShowBulkModal(false)} disabled={bulkSending}>&times;</button>
+            </div>
+
+            {bulkError && (
+              <div style={{ background: 'var(--danger-glow)', color: '#f87171', padding: '0.75rem 1rem', borderRadius: '8px', marginBottom: '1.25rem', fontSize: '0.85rem' }}>
+                {bulkError}
+              </div>
+            )}
+
+            {bulkSuccess && (
+              <div style={{ background: 'var(--success-glow)', color: '#34d399', padding: '0.75rem 1rem', borderRadius: '8px', marginBottom: '1.25rem', fontSize: '0.85rem', textAlign: 'center' }}>
+                {bulkSuccess}
+              </div>
+            )}
+
+            <form onSubmit={handleSendBulkOutreach}>
+              {/* Template selector */}
+              <div className="form-group">
+                <label className="form-label">Select Saved Draft Template</label>
+                <select
+                  className="form-control"
+                  value={selectedTemplateId}
+                  onChange={(e) => handleTemplateChangeForBulk(e.target.value)}
+                  disabled={bulkSending}
+                >
+                  <option value="">-- No Template Selected --</option>
+                  {drafts.map(d => (
+                    <option key={d.id} value={d.id}>{d.subject}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Delivery Service Selection */}
+              <div className="form-group">
+                <label className="form-label">Delivery Service</label>
+                <div style={{ display: 'flex', gap: '1rem', marginTop: '0.25rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="bulk-email-service"
+                      checked={bulkService === 'smtp'}
+                      onChange={() => setBulkService('smtp')}
+                      disabled={bulkSending}
+                    />
+                    Autopilot (SMTP/Mailgun Settings)
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="bulk-email-service"
+                      checked={bulkService === 'gmail'}
+                      onChange={() => setBulkService('gmail')}
+                      disabled={bulkSending}
+                    />
+                    Gmail (Direct SMTP Relay)
+                  </label>
+                </div>
+              </div>
+
+              {bulkService === 'gmail' && (
+                <div className="glass-panel" style={{ padding: '1rem', marginBottom: '1.25rem', background: 'rgba(255,255,255,0.02)' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label" style={{ fontSize: '0.75rem' }}>Gmail Account</label>
+                      <input
+                        type="email"
+                        className="form-control"
+                        placeholder="user@gmail.com"
+                        value={bulkGmailUser}
+                        onChange={(e) => setBulkGmailUser(e.target.value)}
+                        disabled={bulkSending}
+                      />
+                    </div>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label" style={{ fontSize: '0.75rem' }}>App Password</label>
+                      <input
+                        type="password"
+                        className="form-control"
+                        placeholder="xxxx xxxx xxxx xxxx"
+                        value={bulkGmailPass}
+                        onChange={(e) => setBulkGmailPass(e.target.value)}
+                        disabled={bulkSending}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">Subject</label>
+                <input
+                  type="text"
+                  className="form-control"
+                  value={bulkSubject}
+                  onChange={(e) => setBulkSubject(e.target.value)}
+                  disabled={bulkSending}
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Body (HTML format)</label>
+                <textarea
+                  className="form-control"
+                  style={{ minHeight: '140px', resize: 'vertical' }}
+                  value={bulkBody}
+                  onChange={(e) => setBulkBody(e.target.value)}
+                  disabled={bulkSending}
+                  required
+                />
+              </div>
+
+              {/* Dynamic Preview */}
+              {getBulkPreview() && (
+                <div className="glass-panel" style={{ padding: '1rem', marginBottom: '1.25rem', background: 'rgba(255,255,255,0.01)', border: '1px dashed var(--card-border)' }}>
+                  <h4 style={{ fontSize: '0.8rem', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                    Preview (First Lead: {getBulkPreview()?.website})
+                  </h4>
+                  <div style={{ fontSize: '0.85rem', borderBottom: '1px solid var(--card-border)', paddingBottom: '0.5rem', marginBottom: '0.5rem' }}>
+                    <strong>Subject:</strong> {getBulkPreview()?.subject}
+                  </div>
+                  <div 
+                    style={{ fontSize: '0.85rem', color: 'var(--text-muted)', maxHeight: '120px', overflowY: 'auto' }} 
+                    dangerouslySetInnerHTML={{ __html: getBulkPreview()?.body || '' }}
+                  />
+                </div>
+              )}
+
+              {bulkSending && (
+                <div style={{ marginBottom: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '0.25rem' }}>
+                    <span>Sending bulk emails...</span>
+                    <span>{bulkProgress.current} / {bulkProgress.total}</span>
+                  </div>
+                  <div style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
+                    <div 
+                      style={{ 
+                        height: '100%', 
+                        width: `${(bulkProgress.current / bulkProgress.total) * 100}%`, 
+                        background: 'var(--primary)',
+                        transition: 'width 0.2s ease'
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1.5rem' }}>
+                <button type="button" className="btn btn-secondary" onClick={() => setShowBulkModal(false)} disabled={bulkSending}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={bulkSending || !bulkSubject || !bulkBody}>
+                  {bulkSending ? `Sending (${bulkProgress.current}/${bulkProgress.total})` : '🚀 Send Bulk Outreach'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

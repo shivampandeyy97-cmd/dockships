@@ -780,6 +780,137 @@ async function runBackgroundCrawl(leadId: string, websiteUrl: string) {
   }
 }
 
+// GET all drafts
+app.get('/api/drafts', async (req, res) => {
+  try {
+    const drafts = await allRows('SELECT * FROM dockships_drafts ORDER BY created_at DESC');
+    return res.json(drafts);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch drafts.' });
+  }
+});
+
+// CREATE or UPDATE draft
+app.post('/api/drafts', async (req, res) => {
+  const { id, subject, body } = req.body;
+  if (!subject || !body) {
+    return res.status(400).json({ error: 'Subject and body are required.' });
+  }
+  const draftId = id || crypto.randomUUID();
+  try {
+    await runQuery(
+      `INSERT INTO dockships_drafts (id, subject, body)
+       VALUES (?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         subject=excluded.subject,
+         body=excluded.body`,
+      [draftId, subject.trim(), body.trim()]
+    );
+    const updated = await getRow('SELECT * FROM dockships_drafts WHERE id = ?', [draftId]);
+    return res.json(updated);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to save draft.' });
+  }
+});
+
+// DELETE draft
+app.delete('/api/drafts/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await runQuery('DELETE FROM dockships_drafts WHERE id = ?', [id]);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete draft.' });
+  }
+});
+
+// POST Bulk email sending
+app.post('/api/leads/bulk-email', async (req, res) => {
+  const { leadIds, subject, body, service, gmailConfig, userId } = req.body;
+
+  if (!leadIds || !Array.isArray(leadIds) || leadIds.length === 0) {
+    return res.status(400).json({ error: 'Array of lead IDs is required.' });
+  }
+  if (!subject || !body || !userId) {
+    return res.status(400).json({ error: 'Subject, body, and user credentials are required.' });
+  }
+
+  const results: Array<{ leadId: string; website: string; success: boolean; error?: string }> = [];
+
+  try {
+    const backendUrl = req.protocol + '://' + req.get('host');
+
+    for (const leadId of leadIds) {
+      try {
+        const lead = await getRow<any>('SELECT * FROM dockships_leads WHERE id = ?', [leadId]);
+        if (!lead) {
+          results.push({ leadId, website: 'Unknown', success: false, error: 'Lead not found.' });
+          continue;
+        }
+
+        const emailsList = JSON.parse(lead.fetched_emails || '[]');
+        const recipient = lead.manual_email || (emailsList.length > 0 ? emailsList[0] : null);
+
+        if (!recipient) {
+          results.push({ leadId, website: lead.website, success: false, error: 'No recipient email found.' });
+          continue;
+        }
+
+        const pocName = lead.poc_name || 'Team';
+
+        let replacedSubject = subject
+          .replace(/\{\{website\}\}/g, lead.website)
+          .replace(/\{\{poc\}\}/g, pocName);
+        let replacedBody = body
+          .replace(/\{\{website\}\}/g, lead.website)
+          .replace(/\{\{poc\}\}/g, pocName);
+
+        const logId = crypto.randomUUID();
+
+        // 1. Rewrite HTML links inside the email body for click tracking
+        replacedBody = replacedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
+          if (url.startsWith('http')) {
+            return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
+          }
+          return match;
+        });
+
+        // 2. Append open tracking pixel
+        const htmlWithPixel = replacedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
+
+        const mailResult = await sendOutreachEmail({
+          to: recipient.trim(),
+          subject: replacedSubject.trim(),
+          body: htmlWithPixel,
+          service,
+          gmailConfig
+        }, userId);
+
+        if (!mailResult.success) {
+          results.push({ leadId, website: lead.website, success: false, error: mailResult.error || 'Outreach dispatch failed.' });
+          continue;
+        }
+
+        await runQuery(
+          `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status)
+           VALUES (?, ?, ?, ?, ?, 'sent')`,
+          [logId, leadId, recipient.trim(), replacedSubject.trim(), replacedBody]
+        );
+
+        await runQuery("UPDATE dockships_leads SET status = 'outreach_sent' WHERE id = ?", [leadId]);
+
+        results.push({ leadId, website: lead.website, success: true });
+      } catch (innerErr: any) {
+        results.push({ leadId, website: 'Unknown', success: false, error: innerErr.message });
+      }
+    }
+
+    return res.json({ success: true, results });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Internal bulk outreach error.' });
+  }
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Dockships API Server (SQLite Edition) running on port ${PORT}`);
