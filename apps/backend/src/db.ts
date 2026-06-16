@@ -73,6 +73,9 @@ export function initializeSchema(): Promise<void> {
             crawled_at TEXT,
             poc_name TEXT,
             similarweb_visits INTEGER,
+            similarweb_pages_per_visit REAL,
+            similarweb_total_traffic REAL,
+            similarweb_top_geos TEXT,
             similarweb_country TEXT,
             similarweb_fetched_at TEXT,
             created_at TEXT DEFAULT (datetime('now'))
@@ -113,6 +116,19 @@ export function initializeSchema(): Promise<void> {
           );
         `);
 
+        // Cron Jobs table
+        await runQuery(`
+          CREATE TABLE IF NOT EXISTS dockships_cron_jobs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            expression TEXT NOT NULL,
+            job_type TEXT NOT NULL,
+            active INTEGER DEFAULT 1,
+            last_run TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+          );
+        `);
+
         // Migration block: Add columns to existing table if they don't exist
         try {
           await runQuery('ALTER TABLE dockships_smtp_settings ADD COLUMN mailgun_api_key TEXT;');
@@ -136,6 +152,15 @@ export function initializeSchema(): Promise<void> {
           await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_fetched_at TEXT;');
         } catch (e) {}
         try {
+          await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_pages_per_visit REAL;');
+        } catch (e) {}
+        try {
+          await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_total_traffic REAL;');
+        } catch (e) {}
+        try {
+          await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_top_geos TEXT;');
+        } catch (e) {}
+        try {
           await runQuery('ALTER TABLE dockships_emails ADD COLUMN opened_at TEXT;');
         } catch (e) {}
         try {
@@ -144,6 +169,24 @@ export function initializeSchema(): Promise<void> {
         try {
           await runQuery('ALTER TABLE dockships_emails ADD COLUMN reverted_at TEXT;');
         } catch (e) {}
+
+        // Insert initial cron jobs if table is empty
+        try {
+          const checkCron = await getRow<{ count: number }>('SELECT count(*) as count FROM dockships_cron_jobs');
+          if (checkCron && checkCron.count === 0) {
+            await runQuery(`
+              INSERT INTO dockships_cron_jobs (id, name, expression, job_type, active)
+              VALUES ('cron-1', 'Hourly Leads Status Checker', '0 * * * *', 'hourly_status_check', 1)
+            `);
+            await runQuery(`
+              INSERT INTO dockships_cron_jobs (id, name, expression, job_type, active)
+              VALUES ('cron-2', 'Daily Analytics Cleanup & Sync', '0 0 * * *', 'daily_analytics_sync', 0)
+            `);
+            console.log('Default cron jobs seeded successfully.');
+          }
+        } catch (cronErr) {
+          console.error('Error seeding cron jobs:', cronErr);
+        }
 
         console.log('Database tables successfully initialized.');
         resolve();

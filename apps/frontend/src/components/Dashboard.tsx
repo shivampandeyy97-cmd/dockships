@@ -17,6 +17,9 @@ interface Lead {
   crawled_at?: string;
   poc_name?: string;
   similarweb_visits?: number;
+  similarweb_pages_per_visit?: number;
+  similarweb_total_traffic?: number;
+  similarweb_top_geos?: Array<{ name: string; share: number }>;
   similarweb_country?: string;
   similarweb_fetched_at?: string;
   created_at: string;
@@ -35,6 +38,16 @@ interface EmailLog {
   reverted_at?: string;
 }
 
+interface CronJob {
+  id: string;
+  name: string;
+  expression: string;
+  job_type: string;
+  active: number;
+  last_run?: string;
+  created_at: string;
+}
+
 interface DashboardProps {
   user: User;
   onLogout: () => void;
@@ -45,7 +58,6 @@ function parseCSV(text: string) {
   const lines = text.split(/\r?\n/);
   if (lines.length === 0) return [];
   
-  // Clean headers
   const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/^["']|["']$/g, ''));
   const websiteIndex = headers.findIndex(h => h.includes('website') || h.includes('domain') || h.includes('url'));
   const emailIndex = headers.findIndex(h => h.includes('email') || h.includes('mail') || h.includes('contact'));
@@ -57,7 +69,6 @@ function parseCSV(text: string) {
     const line = lines[i].trim();
     if (!line) continue;
     
-    // Split by comma, respecting quotes
     const tokens: string[] = [];
     let currentToken = '';
     let inQuotes = false;
@@ -90,8 +101,13 @@ function parseCSV(text: string) {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings'>('leads');
+  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'cron'>('leads');
   
+  // Theme state
+  const [theme, setTheme] = useState<'dark' | 'light'>(
+    () => (localStorage.getItem('dockships_theme') as 'dark' | 'light') || 'dark'
+  );
+
   // Leads states
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loadingLeads, setLoadingLeads] = useState(true);
@@ -115,6 +131,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [emailLogs, setEmailLogs] = useState<EmailLog[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
+  // Cron states
+  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
+  const [loadingCron, setLoadingCron] = useState(false);
+
   // Settings states
   const [activeService, setActiveService] = useState<'smtp' | 'mailgun'>('smtp');
   const [smtpHost, setSmtpHost] = useState('');
@@ -127,6 +147,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [mailgunDomain, setMailgunDomain] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState({ success: '', error: '' });
+
+  // Apply Theme Toggle Class
+  useEffect(() => {
+    if (theme === 'light') {
+      document.documentElement.classList.add('light-theme');
+    } else {
+      document.documentElement.classList.remove('light-theme');
+    }
+    localStorage.setItem('dockships_theme', theme);
+  }, [theme]);
 
   // Fetch functions
   const fetchLeads = async () => {
@@ -158,6 +188,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
+  const fetchCronJobs = async () => {
+    setLoadingCron(true);
+    try {
+      const response = await fetch(`${API_URL}/api/cron`);
+      if (response.ok) {
+        const data = await response.json();
+        setCronJobs(data);
+      }
+    } catch (e) {
+      console.error('Error loading cron jobs:', e);
+    } finally {
+      setLoadingCron(false);
+    }
+  };
+
   const fetchSmtpSettings = async () => {
     try {
       const response = await fetch(`${API_URL}/api/settings/smtp?userId=${user.id}`);
@@ -182,7 +227,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     fetchLeads();
     fetchSmtpSettings();
     
-    // Poll leads every 5 seconds to catch completed background crawls / scrapes
     const interval = setInterval(fetchLeads, 5000);
     return () => clearInterval(interval);
   }, []);
@@ -190,6 +234,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   useEffect(() => {
     if (activeTab === 'logs') {
       fetchLogs();
+    } else if (activeTab === 'cron') {
+      fetchCronJobs();
     }
   }, [activeTab]);
 
@@ -265,7 +311,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       });
       if (response.ok) {
         fetchLeads();
-        // Remove from selection if deleted
         setSelectedLeadIds(prev => {
           const updated = { ...prev };
           delete updated[id];
@@ -333,7 +378,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         setCsvError(err.message || 'Failed to process CSV file.');
       } finally {
         setCsvUploading(false);
-        e.target.value = ''; // Reset input
+        e.target.value = ''; 
       }
     };
     reader.readAsText(file);
@@ -368,12 +413,63 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         })
       });
       if (response.ok) {
-        alert(`Successfully simulated reply webhook from ${email}. Check dashboard status!`);
+        alert(`Successfully simulated reply webhook from ${email}. Status updated!`);
         fetchLeads();
         fetchLogs();
       }
     } catch (e) {
       console.error('Error simulating reply:', e);
+    }
+  };
+
+  const handleSimulateBounce = async (email: string) => {
+    if (!email) return;
+    try {
+      const response = await fetch(`${API_URL}/api/emails/webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          'event-data': {
+            event: 'failed',
+            recipient: email,
+            reason: 'Hardbounce: Recipient mailbox unavailable'
+          }
+        })
+      });
+      if (response.ok) {
+        alert(`Successfully simulated permanent bounce webhook for ${email}. Status updated!`);
+        fetchLeads();
+        fetchLogs();
+      }
+    } catch (e) {
+      console.error('Error simulating bounce:', e);
+    }
+  };
+
+  const handleToggleCron = async (id: string, active: boolean) => {
+    try {
+      const response = await fetch(`${API_URL}/api/cron/${id}/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active })
+      });
+      if (response.ok) {
+        fetchCronJobs();
+      }
+    } catch (e) {
+      console.error('Error toggling cron job:', e);
+    }
+  };
+
+  const handleRunCron = async (id: string) => {
+    try {
+      const response = await fetch(`${API_URL}/api/cron/${id}/run`, { method: 'POST' });
+      if (response.ok) {
+        alert('Cron job triggered successfully! Check server logs for output.');
+        fetchCronJobs();
+      }
+    } catch (e) {
+      console.error('Error executing cron:', e);
     }
   };
 
@@ -406,7 +502,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       }
 
       setSettingsStatus({ success: 'Configuration successfully saved!', error: '' });
-      setSmtpPassword(''); // Clear password fields
+      setSmtpPassword(''); 
       setMailgunApiKey('');
     } catch (err: any) {
       setSettingsStatus({ success: '', error: err.message || 'Network error occurred.' });
@@ -415,7 +511,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
-  // Compute stat counters
+  // Stats
   const totalLeads = leads.length;
   const activeDomains = leads.filter(l => l.domain_active).length;
   const emailsCollected = leads.reduce((acc, lead) => {
@@ -454,6 +550,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             📋 Outreach Logs
           </button>
           <button 
+            className={`btn ${activeTab === 'cron' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setActiveTab('cron')}
+            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+          >
+            ⏰ Task Scheduler
+          </button>
+          <button 
             className={`btn ${activeTab === 'settings' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('settings')}
             style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
@@ -463,6 +566,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         </nav>
 
         <div className="user-profile">
+          <button 
+            className="btn btn-secondary" 
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}
+          >
+            {theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
+          </button>
           <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
             User: <strong style={{ color: 'var(--text-bright)' }}>{user.email}</strong>
           </span>
@@ -483,7 +593,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                 <div className="stat-value">{totalLeads}</div>
                 <div className="stat-label">Total Leads</div>
               </div>
-              <div className="stat-card" style={{ borderLeft: '1px solid rgba(255,255,255,0.06)', borderRight: '1px solid rgba(255,255,255,0.06)' }}>
+              <div className="stat-card" style={{ borderLeft: '1px solid var(--card-border)', borderRight: '1px solid var(--card-border)' }}>
                 <div className="stat-value" style={{ color: 'var(--success)' }}>{activeDomains}</div>
                 <div className="stat-label">Active Sites</div>
               </div>
@@ -631,8 +741,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                       <th>Domain</th>
                       <th>POC Name</th>
                       <th>Status</th>
-                      <th>Visits</th>
-                      <th>Country</th>
+                      <th>Monthly Visits</th>
+                      <th>Total Volume</th>
+                      <th>Top 5 GEOS</th>
                       <th>Contact Details</th>
                       <th>Flow Status</th>
                       <th style={{ textAlign: 'right' }}>Actions</th>
@@ -671,7 +782,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                           </td>
                           <td>
                             {lead.poc_name ? (
-                              <span style={{ color: 'var(--text-bright)' }}>{lead.poc_name}</span>
+                              <span style={{ color: 'var(--text-bright)', fontWeight: 500 }}>{lead.poc_name}</span>
                             ) : (
                               <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>-</span>
                             )}
@@ -695,19 +806,40 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                             )}
                           </td>
                           <td>
-                            {typeof lead.similarweb_visits === 'number' && lead.similarweb_visits !== null ? (
-                              <span style={{ color: 'var(--primary)', fontWeight: 600 }}>
-                                {new Intl.NumberFormat('en-US', { notation: 'compact' }).format(lead.similarweb_visits)}
-                              </span>
+                            {lead.similarweb_visits !== undefined && lead.similarweb_visits !== null ? (
+                              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                <strong style={{ color: 'var(--text-bright)' }}>
+                                  {new Intl.NumberFormat('en-US', { notation: 'compact' }).format(lead.similarweb_visits)}
+                                </strong>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                                  {lead.similarweb_pages_per_visit ? `${lead.similarweb_pages_per_visit.toFixed(1)} p/v` : '-'}
+                                </span>
+                              </div>
                             ) : (
                               <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>
                             )}
                           </td>
                           <td>
-                            {lead.similarweb_country ? (
-                              <span style={{ fontSize: '0.85rem' }}>
-                                🌍 {lead.similarweb_country}
-                              </span>
+                            {lead.similarweb_total_traffic !== undefined && lead.similarweb_total_traffic !== null ? (
+                              <strong style={{ color: 'var(--primary)', fontWeight: 700 }}>
+                                {new Intl.NumberFormat('en-US', { notation: 'compact' }).format(lead.similarweb_total_traffic)}
+                              </strong>
+                            ) : (
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>
+                            )}
+                          </td>
+                          <td>
+                            {Array.isArray(lead.similarweb_top_geos) && lead.similarweb_top_geos.length > 0 ? (
+                              <div className="geo-list">
+                                {lead.similarweb_top_geos.slice(0, 5).map((geo: any, idx: number) => (
+                                  <div key={idx} className="geo-badge">
+                                    <span>{geo.name}</span>
+                                    <strong style={{ color: 'var(--primary)', marginLeft: '4px' }}>
+                                      {(geo.share * 100).toFixed(0)}%
+                                    </strong>
+                                  </div>
+                                ))}
+                              </div>
                             ) : (
                               <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>
                             )}
@@ -743,6 +875,14 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                               <span className="badge badge-primary" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
                                 👁️ Opened
                               </span>
+                            ) : lead.status === 'delivered' ? (
+                              <span className="badge badge-info" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
+                                📦 Delivered
+                              </span>
+                            ) : lead.status === 'bounced' ? (
+                              <span className="badge badge-danger">
+                                🚫 Bounced
+                              </span>
                             ) : lead.status === 'outreach_sent' ? (
                               <span className="badge badge-secondary" style={{ background: 'rgba(156, 163, 175, 0.15)', color: '#9ca3af', border: '1px solid rgba(156, 163, 175, 0.3)' }}>
                                 ✉️ Sent
@@ -762,7 +902,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                                 style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
                                 onClick={() => handleForceCrawl(lead.id)}
                                 disabled={isCrawling}
-                                title="Force crawler to parse emails"
+                                title="Run merged status, emails and SimilarWeb checks"
                               >
                                 {isCrawling ? 'Crawling...' : 'Crawl'}
                               </button>
@@ -771,7 +911,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                                 style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
                                 onClick={() => handleFetchSimilarWeb(lead.id)}
                                 disabled={isFetchingSW}
-                                title="Scrape SimilarWeb visits & geography"
+                                title="Scrape SimilarWeb visits & geography separately"
                               >
                                 {isFetchingSW ? 'SW Fetch...' : 'SW'}
                               </button>
@@ -809,7 +949,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         <main className="glass-panel" style={{ padding: '2rem', minHeight: '450px' }}>
           <h2 className="card-title">Outreach Communication Logs & Email Activity</h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
-            Track opens, clicks, and replies automatically. You can also manually override tracking states or simulate replies for testing.
+            Track opens, clicks, delivery states, and replies automatically. Override statuses manually or trigger simulation events.
           </p>
 
           {loadingLogs ? (
@@ -830,7 +970,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                     <th>Recipient</th>
                     <th>Subject</th>
                     <th>Email Status Tracker</th>
-                    <th>Actions</th>
+                    <th>Simulators</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -841,22 +981,26 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                       <td>{log.subject}</td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <span style={{ fontSize: '0.8rem' }} className={`badge ${
+                          <span className={`badge ${
                             log.status === 'reverted' ? 'badge-success' :
                             log.status === 'clicked' ? 'badge-info' :
-                            log.status === 'opened' ? 'badge-primary' : 'badge-secondary'
-                          }`}>
+                            log.status === 'opened' ? 'badge-primary' :
+                            log.status === 'delivered' ? 'badge-info' :
+                            log.status === 'bounced' ? 'badge-danger' : 'badge-secondary'
+                          }`} style={{ fontSize: '0.75rem' }}>
                             {log.status === 'reverted' ? 'Replied' :
                              log.status === 'clicked' ? 'Clicked' :
-                             log.status === 'opened' ? 'Opened' : 'Sent'}
+                             log.status === 'opened' ? 'Opened' :
+                             log.status === 'delivered' ? 'Delivered' :
+                             log.status === 'bounced' ? 'Bounced' : 'Sent'}
                           </span>
                           <select
                             value={log.status}
                             onChange={(e) => handleOverrideStatus(log.id, e.target.value)}
                             style={{
-                              background: 'rgba(15, 23, 42, 0.8)',
-                              color: 'white',
-                              border: '1px solid rgba(255,255,255,0.15)',
+                              background: 'var(--input-bg)',
+                              color: 'var(--input-color)',
+                              border: '1px solid var(--input-border)',
                               borderRadius: '4px',
                               padding: '0.15rem 0.3rem',
                               fontSize: '0.75rem',
@@ -864,20 +1008,110 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                             }}
                           >
                             <option value="sent">Sent</option>
+                            <option value="delivered">Delivered</option>
                             <option value="opened">Opened</option>
                             <option value="clicked">Clicked</option>
+                            <option value="bounced">Bounced</option>
                             <option value="reverted">Replied/Reverted</option>
                           </select>
                         </div>
                       </td>
                       <td>
+                        <div style={{ display: 'flex', gap: '0.4rem' }}>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                            onClick={() => handleSimulateReply(log.recipient_email)}
+                            title="Simulate recipient replying to this email"
+                          >
+                            💬 Reply
+                          </button>
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--danger)' }}
+                            onClick={() => handleSimulateBounce(log.recipient_email)}
+                            title="Simulate Mailgun permanent bounce event"
+                          >
+                            🚫 Bounce
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </main>
+      )}
+
+      {/* Task Scheduler Tab */}
+      {activeTab === 'cron' && (
+        <main className="glass-panel" style={{ padding: '2rem', minHeight: '450px' }}>
+          <h2 className="card-title">⏰ Cron Jobs & Scheduled Tasks</h2>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
+            Manage and monitor automated background tasks (e.g. status checkers, system syncing). Tasks can be toggled on/off, or triggered immediately.
+          </p>
+
+          {loadingCron && cronJobs.length === 0 ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
+              Retrieving scheduler details...
+            </div>
+          ) : cronJobs.length === 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
+              <span>⏰</span>
+              <p style={{ marginTop: '0.5rem' }}>No cron jobs configured in system database.</p>
+            </div>
+          ) : (
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Job Name</th>
+                    <th>Cron Expression</th>
+                    <th>Job Type</th>
+                    <th>Last Run Time</th>
+                    <th>State</th>
+                    <th style={{ textAlign: 'right' }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cronJobs.map((job) => (
+                    <tr key={job.id}>
+                      <td style={{ fontWeight: 600, color: 'var(--text-bright)' }}>{job.name}</td>
+                      <td>
+                        <code style={{ background: 'rgba(0,0,0,0.15)', padding: '0.2rem 0.4rem', borderRadius: '4px', fontSize: '0.85rem' }}>
+                          {job.expression}
+                        </code>
+                      </td>
+                      <td>{job.job_type}</td>
+                      <td>
+                        {job.last_run ? (
+                          new Date(job.last_run).toLocaleString()
+                        ) : (
+                          <span style={{ fontStyle: 'italic', color: 'var(--text-muted)' }}>Never run</span>
+                        )}
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span className={`badge ${job.active === 1 ? 'badge-success' : 'badge-secondary'}`}>
+                            {job.active === 1 ? 'Active' : 'Disabled'}
+                          </span>
+                          <input 
+                            type="checkbox" 
+                            checked={job.active === 1}
+                            onChange={(e) => handleToggleCron(job.id, e.target.checked)}
+                            style={{ cursor: 'pointer' }}
+                          />
+                        </div>
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
                         <button
-                          className="btn btn-secondary"
-                          style={{ padding: '0.25rem 0.6rem', fontSize: '0.75rem' }}
-                          onClick={() => handleSimulateReply(log.recipient_email)}
-                          title="Simulate recipient replying to this email"
+                          className="btn btn-primary"
+                          style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                          onClick={() => handleRunCron(job.id)}
                         >
-                          ⚡ Simulate Reply
+                          ⚡ Run Now
                         </button>
                       </td>
                     </tr>
@@ -991,7 +1225,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                     value={smtpPassword}
                     onChange={(e) => setSmtpPassword(e.target.value)}
                     disabled={savingSettings}
-                    required={activeService === 'smtp' && !smtpHost} // Only require if setting up for first time
+                    required={activeService === 'smtp' && !smtpHost} 
                   />
                 </div>
               </div>
@@ -1024,7 +1258,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                     value={mailgunApiKey}
                     onChange={(e) => setMailgunApiKey(e.target.value)}
                     disabled={savingSettings}
-                    required={activeService === 'mailgun' && !mailgunDomain} // Only require key if setting up first time
+                    required={activeService === 'mailgun' && !mailgunDomain} 
                   />
                 </div>
               </div>

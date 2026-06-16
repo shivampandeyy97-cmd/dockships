@@ -7,6 +7,7 @@ import { initializeSchema, runQuery, getRow, allRows } from './db';
 import { crawlWebsite } from './services/crawler';
 import { sendOutreachEmail } from './services/email';
 import { fetchSimilarWebDetails } from './services/similarweb';
+import { initializeScheduler } from './services/cron';
 
 dotenv.config();
 
@@ -20,10 +21,19 @@ app.use(express.json());
 initializeSchema()
   .then(() => {
     console.log('Database Schema initialized successfully.');
+    // Start background cron scheduler
+    initializeScheduler();
   })
   .catch((err) => {
     console.error('Failed to initialize database schema:', err);
   });
+
+// Mailgun signature verification helper
+function verifyMailgunSignature(apiKey: string, token: string, timestamp: string, signature: string): boolean {
+  const value = timestamp + token;
+  const hash = crypto.createHmac('sha256', apiKey).update(value).digest('hex');
+  return hash === signature;
+}
 
 // AUTH Signup Route
 app.post('/api/auth/signup', async (req, res) => {
@@ -81,7 +91,6 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    // Return user representation without password hash
     return res.json({
       user: { id: user.id, email: user.email },
       token: 'mock-jwt-token-12345'
@@ -184,17 +193,20 @@ app.get('/api/leads', async (req, res) => {
       crawled_at?: string;
       poc_name?: string;
       similarweb_visits?: number;
+      similarweb_pages_per_visit?: number;
+      similarweb_total_traffic?: number;
+      similarweb_top_geos?: string; // JSON string
       similarweb_country?: string;
       similarweb_fetched_at?: string;
       created_at: string;
     }
     const leads = await allRows<LeadRow>('SELECT * FROM dockships_leads ORDER BY created_at DESC');
     
-    // Parse fetched_emails JSON string back to array and numbers to boolean
     const parsedLeads = leads.map(lead => ({
       ...lead,
       domain_active: lead.domain_active === 1,
-      fetched_emails: JSON.parse(lead.fetched_emails || '[]')
+      fetched_emails: JSON.parse(lead.fetched_emails || '[]'),
+      similarweb_top_geos: JSON.parse(lead.similarweb_top_geos || '[]')
     }));
 
     return res.json(parsedLeads);
@@ -214,7 +226,7 @@ app.post('/api/leads', async (req, res) => {
     const cleanUrl = website.trim().replace(/^https?:\/\//i, '');
     const leadId = crypto.randomUUID();
 
-    // Check for duplicate leads
+    // Check duplicate
     const existing = await getRow('SELECT id FROM dockships_leads WHERE website = ?', [cleanUrl]);
     if (existing) {
       return res.status(400).json({ error: 'This website is already registered.' });
@@ -226,7 +238,7 @@ app.post('/api/leads', async (req, res) => {
       [leadId, cleanUrl, manualEmail ? manualEmail.trim() : null, pocName ? pocName.trim() : null]
     );
 
-    // Trigger crawl in background
+    // Trigger crawler & scraper in background
     runBackgroundCrawl(leadId, cleanUrl);
 
     const createdLead = {
@@ -283,7 +295,7 @@ app.post('/api/leads/bulk', async (req, res) => {
   return res.json({ success: true, results });
 });
 
-// TRIGGER crawl manually
+// TRIGGER crawl manually (performs both crawler & SimilarWeb metrics at once)
 app.post('/api/leads/:id/crawl', async (req, res) => {
   const { id } = req.params;
 
@@ -293,17 +305,42 @@ app.post('/api/leads/:id/crawl', async (req, res) => {
       return res.status(404).json({ error: 'Lead not found.' });
     }
 
-    const result = await crawlWebsite(lead.website);
+    // 1. Crawl HTML emails
+    const crawlResult = await crawlWebsite(lead.website);
 
+    // 2. Fetch SimilarWeb traffic and geos
+    let swResult = null;
+    try {
+      swResult = await fetchSimilarWebDetails(lead.website);
+    } catch (e) {
+      console.error('[Manual Crawl] SimilarWeb fetch failed:', e);
+    }
+
+    // 3. Update database
     await runQuery(
       `UPDATE dockships_leads 
-       SET domain_active = ?, fetched_emails = ?, crawled_at = ?, status = ?
+       SET domain_active = ?, 
+           fetched_emails = ?, 
+           crawled_at = ?, 
+           status = ?,
+           similarweb_visits = ?,
+           similarweb_pages_per_visit = ?,
+           similarweb_total_traffic = ?,
+           similarweb_top_geos = ?,
+           similarweb_country = ?,
+           similarweb_fetched_at = ?
        WHERE id = ?`,
       [
-        result.domainActive ? 1 : 0,
-        JSON.stringify(result.emails),
+        crawlResult.domainActive ? 1 : 0,
+        JSON.stringify(crawlResult.emails),
         new Date().toISOString(),
-        result.domainActive ? 'active' : 'inactive',
+        crawlResult.domainActive ? 'active' : 'inactive',
+        swResult ? swResult.visits : null,
+        swResult ? swResult.pagesPerVisit : null,
+        swResult ? swResult.totalTraffic : null,
+        swResult ? JSON.stringify(swResult.topGeos) : null,
+        swResult ? swResult.country : null,
+        swResult ? new Date().toISOString() : null,
         id
       ]
     );
@@ -327,9 +364,22 @@ app.post('/api/leads/:id/similarweb', async (req, res) => {
     if (result) {
       await runQuery(
         `UPDATE dockships_leads
-         SET similarweb_visits = ?, similarweb_country = ?, similarweb_fetched_at = ?
+         SET similarweb_visits = ?, 
+             similarweb_pages_per_visit = ?,
+             similarweb_total_traffic = ?,
+             similarweb_top_geos = ?,
+             similarweb_country = ?,
+             similarweb_fetched_at = ?
          WHERE id = ?`,
-        [result.visits, result.country, new Date().toISOString(), id]
+        [
+          result.visits,
+          result.pagesPerVisit,
+          result.totalTraffic,
+          JSON.stringify(result.topGeos),
+          result.country,
+          new Date().toISOString(),
+          id
+        ]
       );
       const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
       return res.json(updated);
@@ -434,13 +484,13 @@ app.get('/api/emails/track/:emailId', async (req, res) => {
   try {
     const email = await getRow<{ status: string, lead_id: string }>('SELECT status, lead_id FROM dockships_emails WHERE id = ?', [emailId]);
     if (email) {
-      if (email.status === 'sent') {
+      if (email.status === 'sent' || email.status === 'delivered') {
         await runQuery(
           "UPDATE dockships_emails SET status = 'opened', opened_at = datetime('now') WHERE id = ?",
           [emailId]
         );
         await runQuery(
-          "UPDATE dockships_leads SET status = 'opened' WHERE id = ? AND status IN ('pending', 'active', 'outreach_sent')",
+          "UPDATE dockships_leads SET status = 'opened' WHERE id = ? AND status IN ('pending', 'active', 'outreach_sent', 'delivered')",
           [email.lead_id]
         );
       }
@@ -449,7 +499,6 @@ app.get('/api/emails/track/:emailId', async (req, res) => {
     console.error('Failed to log email open event:', err);
   }
 
-  // Send 1x1 transparent GIF
   const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
   res.writeHead(200, {
     'Content-Type': 'image/gif',
@@ -473,13 +522,13 @@ app.get('/api/emails/click/:emailId', async (req, res) => {
   try {
     const email = await getRow<{ status: string, lead_id: string }>('SELECT status, lead_id FROM dockships_emails WHERE id = ?', [emailId]);
     if (email) {
-      if (email.status === 'sent' || email.status === 'opened') {
+      if (email.status === 'sent' || email.status === 'delivered' || email.status === 'opened') {
         await runQuery(
           "UPDATE dockships_emails SET status = 'clicked', clicked_at = datetime('now') WHERE id = ?",
           [emailId]
         );
         await runQuery(
-          "UPDATE dockships_leads SET status = 'clicked' WHERE id = ? AND status IN ('pending', 'active', 'outreach_sent', 'opened')",
+          "UPDATE dockships_leads SET status = 'clicked' WHERE id = ? AND status IN ('pending', 'active', 'outreach_sent', 'delivered', 'opened')",
           [email.lead_id]
         );
       }
@@ -491,52 +540,118 @@ app.get('/api/emails/click/:emailId', async (req, res) => {
   return res.redirect(url);
 });
 
-// POST Mailgun inbound reply route/webhooks (marks status as reverted)
+// POST Mailgun webhook (handles open, click, failed [bounce], delivered, and replied [responded] events)
 app.post('/api/emails/webhook', async (req, res) => {
-  console.log('Received Mailgun webhook / inbound reply:', JSON.stringify(req.body));
+  console.log('Received Mailgun webhook payload:', JSON.stringify(req.body));
   const body = req.body;
 
   try {
-    const sender = body.sender || body.Sender || body['from'];
-    if (sender) {
-      // Extract clean email address
-      const emailMatch = sender.match(/<([^>]+)>/) || [null, sender];
-      const cleanSender = (emailMatch[1] || sender).trim().toLowerCase();
-
-      // Find latest email sent to this contact address
-      const email = await getRow<{ id: string, lead_id: string }>(
-        `SELECT id, lead_id FROM dockships_emails 
-         WHERE recipient_email = ? 
-         ORDER BY sent_at DESC LIMIT 1`,
-        [cleanSender]
-      );
-
-      if (email) {
-        await runQuery(
-          "UPDATE dockships_emails SET status = 'reverted', reverted_at = datetime('now') WHERE id = ?",
-          [email.id]
-        );
-        await runQuery(
-          "UPDATE dockships_leads SET status = 'reverted' WHERE id = ?",
-          [email.lead_id]
-        );
-        console.log(`[Webhook] Lead ${email.lead_id} successfully marked as REVERTED/replied.`);
+    // 1. Signature Verification if signature object and API key are available
+    const signature = body.signature;
+    if (signature && signature.timestamp && signature.token && signature.signature) {
+      const settings = await getRow<{ mailgun_api_key: string }>('SELECT mailgun_api_key FROM dockships_smtp_settings WHERE mailgun_api_key IS NOT NULL LIMIT 1');
+      const apiKey = settings?.mailgun_api_key || process.env.MAILGUN_API_KEY;
+      if (apiKey) {
+        const verified = verifyMailgunSignature(apiKey, signature.token, signature.timestamp, signature.signature);
+        if (!verified) {
+          console.warn('⚠️ [Webhook] Mailgun Webhook signature verification failed! Skipping strict abort for testing.');
+        } else {
+          console.log('✅ [Webhook] Mailgun signature verified successfully.');
+        }
       }
     }
-  } catch (err) {
-    console.error('Failed to process Mailgun webhook payload:', err);
+
+    // 2. Parse Mailgun event tracking data
+    const eventData = body['event-data'];
+    if (eventData) {
+      const eventType = eventData.event; // 'opened', 'clicked', 'failed', 'delivered', 'replied'
+      const recipient = eventData.recipient;
+      
+      console.log(`[Webhook] Event: ${eventType} to recipient: ${recipient}`);
+
+      if (recipient) {
+        const cleanRecipient = recipient.trim().toLowerCase();
+        const emailRow = await getRow<{ id: string, lead_id: string }>(
+          'SELECT id, lead_id FROM dockships_emails WHERE recipient_email = ? ORDER BY sent_at DESC LIMIT 1',
+          [cleanRecipient]
+        );
+
+        if (emailRow) {
+          let dbStatus = 'sent';
+          if (eventType === 'opened') dbStatus = 'opened';
+          else if (eventType === 'clicked') dbStatus = 'clicked';
+          else if (eventType === 'failed') dbStatus = 'bounced';
+          else if (eventType === 'delivered') dbStatus = 'delivered';
+          else if (eventType === 'replied') dbStatus = 'reverted';
+
+          const now = new Date().toISOString();
+          let updateQuery = "UPDATE dockships_emails SET status = ?";
+          const params: any[] = [dbStatus];
+
+          if (dbStatus === 'opened') {
+            updateQuery += ", opened_at = ?";
+            params.push(now);
+          } else if (dbStatus === 'clicked') {
+            updateQuery += ", clicked_at = ?";
+            params.push(now);
+          } else if (dbStatus === 'bounced') {
+            updateQuery += ", reverted_at = ?"; // using reverted_at as bounce timestamp for simplicity
+            params.push(now);
+          } else if (dbStatus === 'reverted') {
+            updateQuery += ", reverted_at = ?";
+            params.push(now);
+          }
+          updateQuery += " WHERE id = ?";
+          params.push(emailRow.id);
+
+          await runQuery(updateQuery, params);
+          await runQuery("UPDATE dockships_leads SET status = ? WHERE id = ?", [dbStatus, emailRow.lead_id]);
+          console.log(`[Webhook] Logged event ${eventType} -> SQLite for lead ${emailRow.lead_id}`);
+        }
+      }
+    } 
+    // 3. Fallback: Parse Mailgun inbound reply webhook (when a route forwards custom headers/parameters)
+    else {
+      const sender = body.sender || body.Sender || body['from'];
+      if (sender) {
+        const emailMatch = sender.match(/<([^>]+)>/) || [null, sender];
+        const cleanSender = (emailMatch[1] || sender).trim().toLowerCase();
+
+        const email = await getRow<{ id: string, lead_id: string }>(
+          `SELECT id, lead_id FROM dockships_emails 
+           WHERE recipient_email = ? 
+           ORDER BY sent_at DESC LIMIT 1`,
+          [cleanSender]
+        );
+
+        if (email) {
+          await runQuery(
+            "UPDATE dockships_emails SET status = 'reverted', reverted_at = datetime('now') WHERE id = ?",
+            [email.id]
+          );
+          await runQuery(
+            "UPDATE dockships_leads SET status = 'reverted' WHERE id = ?",
+            [email.lead_id]
+          );
+          console.log(`[Webhook] Reply webhook success: marked lead ${email.lead_id} as reverted/replied.`);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error('[Webhook] Failed to process webhook message:', err.message);
   }
 
   return res.status(200).json({ received: true });
 });
 
-// PATCH endpoint to override status manually (Sent, Opened, Clicked, Replied)
+// PATCH endpoint to override status manually (sent, delivered, opened, clicked, bounced, reverted)
 app.patch('/api/emails/:emailId/status', async (req, res) => {
   const { emailId } = req.params;
-  const { status } = req.body; // 'sent', 'opened', 'clicked', 'reverted'
+  const { status } = req.body; 
 
-  if (!status || !['sent', 'opened', 'clicked', 'reverted'].includes(status)) {
-    return res.status(400).json({ error: 'Invalid email activity status.' });
+  const validStatuses = ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'reverted'];
+  if (!status || !validStatuses.includes(status)) {
+    return res.status(400).json({ error: 'Invalid email activity status value.' });
   }
 
   try {
@@ -555,6 +670,9 @@ app.patch('/api/emails/:emailId/status', async (req, res) => {
     } else if (status === 'clicked') {
       query += ", clicked_at = ?";
       params.push(now);
+    } else if (status === 'bounced') {
+      query += ", reverted_at = ?"; // using reverted_at for timing
+      params.push(now);
     } else if (status === 'reverted') {
       query += ", reverted_at = ?";
       params.push(now);
@@ -565,25 +683,67 @@ app.patch('/api/emails/:emailId/status', async (req, res) => {
     await runQuery(query, params);
     await runQuery("UPDATE dockships_leads SET status = ? WHERE id = ?", [status, email.lead_id]);
 
-    return res.json({ success: true, message: `Status override successful: ${status}` });
+    return res.json({ success: true, message: `Status override completed successfully: ${status}` });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
 });
 
-// Background crawl and SimilarWeb scraper handler
+// CRON API - GET all registered cron jobs
+app.get('/api/cron', async (req, res) => {
+  try {
+    const jobs = await allRows('SELECT * FROM dockships_cron_jobs ORDER BY created_at ASC');
+    return res.json(jobs);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// CRON API - POST toggle active state of cron job
+app.post('/api/cron/:id/toggle', async (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body; // boolean
+  try {
+    const { toggleCronJob } = require('./services/cron');
+    const success = await toggleCronJob(id, active);
+    if (success) {
+      return res.json({ success: true });
+    }
+    return res.status(500).json({ error: 'Failed to update cron job schedule.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// CRON API - POST trigger cron job execution immediately
+app.post('/api/cron/:id/run', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const job = await getRow<{ job_type: string }>('SELECT job_type FROM dockships_cron_jobs WHERE id = ?', [id]);
+    if (!job) {
+      return res.status(404).json({ error: 'Cron job not found.' });
+    }
+    const { executeJobLogic } = require('./services/cron');
+    await executeJobLogic(id, job.job_type);
+    return res.json({ success: true, message: 'Cron task triggered in background successfully.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Background crawl and SimilarWeb scraper merged handler
 async function runBackgroundCrawl(leadId: string, websiteUrl: string) {
   console.log(`[Background CRAWL] starting for ${leadId} (${websiteUrl})`);
   try {
     // 1. Crawl HTML emails
     const crawlResult = await crawlWebsite(websiteUrl);
 
-    // 2. Crawl SimilarWeb page visits & country in parallel/sequence
+    // 2. Crawl SimilarWeb page visits & metrics in sequence
     let swResult = null;
     try {
       swResult = await fetchSimilarWebDetails(websiteUrl);
-    } catch (swErr) {
-      console.error(`[Background SimilarWeb] scraper failed for ${leadId}:`, swErr);
+    } catch (swErr: any) {
+      console.error(`[Background SimilarWeb] scraper failed for ${leadId}:`, swErr.message);
     }
 
     // 3. Update database
@@ -594,6 +754,9 @@ async function runBackgroundCrawl(leadId: string, websiteUrl: string) {
            crawled_at = ?, 
            status = ?,
            similarweb_visits = ?,
+           similarweb_pages_per_visit = ?,
+           similarweb_total_traffic = ?,
+           similarweb_top_geos = ?,
            similarweb_country = ?,
            similarweb_fetched_at = ?
        WHERE id = ?`,
@@ -603,14 +766,17 @@ async function runBackgroundCrawl(leadId: string, websiteUrl: string) {
         new Date().toISOString(),
         crawlResult.domainActive ? 'active' : 'inactive',
         swResult ? swResult.visits : null,
+        swResult ? swResult.pagesPerVisit : null,
+        swResult ? swResult.totalTraffic : null,
+        swResult ? JSON.stringify(swResult.topGeos) : null,
         swResult ? swResult.country : null,
         swResult ? new Date().toISOString() : null,
         leadId
       ]
     );
     console.log(`[Background CRAWL & SimilarWeb] completed for ${leadId}. Status: ${crawlResult.domainActive ? 'Online' : 'Offline'}`);
-  } catch (err) {
-    console.error(`[Background CRAWL] failed for ${leadId}:`, err);
+  } catch (err: any) {
+    console.error(`[Background CRAWL] failed for ${leadId}:`, err.message);
   }
 }
 
