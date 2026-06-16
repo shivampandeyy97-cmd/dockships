@@ -1,0 +1,14 @@
+{
+  "name": "dockships-monorepo",
+  "version": "1.0.0",
+  "description": "Dockships Leads Management, Tracking, and Conversion Dashboard",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter backend dev\" \"pnpm --filter frontend dev\"",
+    "build": "pnpm --filter backend build && pnpm --filter frontend build",
+    "install:all": "pnpm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

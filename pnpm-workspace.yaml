@@ -1,0 +1,6 @@
+packages:
+  - 'apps/*'
+allowBuilds:
+  puppeteer: true
+  sqlite3: true
+  bcryptjs: true
