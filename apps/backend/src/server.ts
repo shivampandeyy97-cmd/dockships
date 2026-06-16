@@ -131,19 +131,35 @@ app.post('/api/settings/smtp', async (req, res) => {
     return res.status(400).json({ error: 'User ID and sender email are required.' });
   }
 
-  const selectedService = activeService || 'smtp';
-
-  if (selectedService === 'smtp') {
-    if (!host || !port || !username || !password) {
-      return res.status(400).json({ error: 'All SMTP configuration fields are required.' });
-    }
-  } else if (selectedService === 'mailgun') {
-    if (!mailgunApiKey || !mailgunDomain) {
-      return res.status(400).json({ error: 'Mailgun API Key and Domain are required.' });
-    }
-  }
-
   try {
+    // Fetch existing settings to preserve passwords/API keys
+    const existing = await getRow<any>(
+      'SELECT password, mailgun_api_key FROM dockships_smtp_settings WHERE user_id = ?',
+      [userId]
+    );
+
+    const selectedService = activeService || 'smtp';
+
+    let finalPassword = password;
+    if (!finalPassword && existing) {
+      finalPassword = existing.password;
+    }
+
+    let finalMailgunApiKey = mailgunApiKey;
+    if ((!finalMailgunApiKey || finalMailgunApiKey === '••••••••••••••••') && existing) {
+      finalMailgunApiKey = existing.mailgun_api_key;
+    }
+
+    if (selectedService === 'smtp') {
+      if (!host || !port || !username || !finalPassword) {
+        return res.status(400).json({ error: 'All SMTP configuration fields (including password) are required.' });
+      }
+    } else if (selectedService === 'mailgun') {
+      if (!finalMailgunApiKey || !mailgunDomain) {
+        return res.status(400).json({ error: 'Mailgun API Key and Domain are required.' });
+      }
+    }
+
     await runQuery(
       `INSERT INTO dockships_smtp_settings (
         user_id, host, port, username, password, sender_name, sender_email,
@@ -165,10 +181,10 @@ app.post('/api/settings/smtp', async (req, res) => {
         host ? host.trim() : null, 
         port ? parseInt(port, 10) : null, 
         username ? username.trim() : null, 
-        password || null, 
+        finalPassword || null, 
         senderName ? senderName.trim() : null, 
         senderEmail.trim(),
-        mailgunApiKey ? mailgunApiKey.trim() : null,
+        finalMailgunApiKey ? finalMailgunApiKey.trim() : null,
         mailgunDomain ? mailgunDomain.trim() : null,
         selectedService
       ]
