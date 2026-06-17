@@ -69,8 +69,22 @@ function parseCSV(text: string) {
   const websiteIndex = headers.findIndex(h => h.includes('website') || h.includes('domain') || h.includes('url'));
   const emailIndex = headers.findIndex(h => h.includes('email') || h.includes('mail') || h.includes('contact'));
   const pocIndex = headers.findIndex(h => h.includes('poc') || h.includes('name') || h.includes('person'));
+  const visitsIndex = headers.findIndex(h => h.includes('visit'));
+  const pagesIndex = headers.findIndex(h => h.includes('page'));
+  const volumeIndex = headers.findIndex(h => h.includes('volume') || h.includes('traffic'));
+  const competitorsIndex = headers.findIndex(h => h.includes('competitor') || h.includes('similar website') || h.includes('similar_website') || h.includes('similarwebsites'));
 
-  const parsedLeads: { website: string; email?: string; pocName?: string }[] = [];
+  interface ParsedLead {
+    website: string;
+    email?: string;
+    pocName?: string;
+    similarwebVisits?: number;
+    similarwebPagesPerVisit?: number;
+    similarwebTotalTraffic?: number;
+    competitors?: string[];
+  }
+
+  const parsedLeads: ParsedLead[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -95,12 +109,29 @@ function parseCSV(text: string) {
     const website = websiteIndex !== -1 ? tokens[websiteIndex] : tokens[0];
     const email = emailIndex !== -1 ? tokens[emailIndex] : tokens[1];
     const pocName = pocIndex !== -1 ? tokens[pocIndex] : tokens[2];
+    const visits = visitsIndex !== -1 ? tokens[visitsIndex] : undefined;
+    const pages = pagesIndex !== -1 ? tokens[pagesIndex] : undefined;
+    const volume = volumeIndex !== -1 ? tokens[volumeIndex] : undefined;
+    const competitors = competitorsIndex !== -1 ? tokens[competitorsIndex] : undefined;
 
     if (website) {
+      let compsList: string[] = [];
+      if (competitors) {
+        compsList = competitors
+          .split(/[;|]/)
+          .flatMap(c => c.split(','))
+          .map(c => c.trim().replace(/^https?:\/\//i, '').replace(/^["']|["']$/g, '').trim())
+          .filter(c => c.length > 0);
+      }
+
       parsedLeads.push({
         website: website.trim(),
         email: email ? email.trim() : undefined,
-        pocName: pocName ? pocName.trim() : undefined
+        pocName: pocName ? pocName.trim() : undefined,
+        similarwebVisits: visits ? parseInt(visits.replace(/,/g, ''), 10) : undefined,
+        similarwebPagesPerVisit: pages ? parseFloat(pages) : undefined,
+        similarwebTotalTraffic: volume ? parseFloat(volume.replace(/,/g, '') || '0') : undefined,
+        competitors: compsList.length > 0 ? compsList : undefined
       });
     }
   }
@@ -108,7 +139,7 @@ function parseCSV(text: string) {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'cron' | 'templates'>('leads');
+  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'cron' | 'templates' | 'originated'>('leads');
   
   // Theme state
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -124,7 +155,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [addingLead, setAddingLead] = useState(false);
   const [activeLeadForOutreach, setActiveLeadForOutreach] = useState<Lead | null>(null);
   const [crawlingIds, setCrawlingIds] = useState<Record<string, boolean>>({});
-  const [fetchingSimilarWebIds, setFetchingSimilarWebIds] = useState<Record<string, boolean>>({});
   
   // Multi-selection
   const [selectedLeadIds, setSelectedLeadIds] = useState<Record<string, boolean>>({});
@@ -181,6 +211,10 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [editingPocLeadId, setEditingPocLeadId] = useState<string | null>(null);
   const [pocNameEditVal, setPocNameEditVal] = useState('');
 
+  // Originated leads states
+  const [originatedLeads, setOriginatedLeads] = useState<any[]>([]);
+  const [loadingOriginated, setLoadingOriginated] = useState(false);
+
   // Apply Theme Toggle Class
   useEffect(() => {
     if (theme === 'light') {
@@ -192,6 +226,55 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   }, [theme]);
 
   // Fetch functions
+  const fetchOriginatedLeads = async () => {
+    setLoadingOriginated(true);
+    try {
+      const response = await fetch(`${API_URL}/api/originated-leads`);
+      if (response.ok) {
+        const data = await response.json();
+        setOriginatedLeads(data);
+      }
+    } catch (e) {
+      console.error('Error loading originated leads:', e);
+    } finally {
+      setLoadingOriginated(false);
+    }
+  };
+
+  const handleConvertOriginated = async (id: string) => {
+    try {
+      const response = await fetch(`${API_URL}/api/originated-leads/${id}/convert`, {
+        method: 'POST'
+      });
+      const data = await response.json();
+      if (response.ok) {
+        alert(data.message || 'Successfully converted originated lead!');
+        fetchOriginatedLeads();
+        fetchLeads();
+      } else {
+        alert(data.error || 'Failed to convert originated lead.');
+      }
+    } catch (e) {
+      console.error('Error converting originated lead:', e);
+    }
+  };
+
+  const handleDeleteOriginated = async (id: string) => {
+    if (!confirm('Are you sure you want to dismiss this originated lead?')) return;
+    try {
+      const response = await fetch(`${API_URL}/api/originated-leads/${id}`, {
+        method: 'DELETE'
+      });
+      if (response.ok) {
+        fetchOriginatedLeads();
+      } else {
+        alert('Failed to delete originated lead.');
+      }
+    } catch (e) {
+      console.error('Error deleting originated lead:', e);
+    }
+  };
+
   const fetchLeads = async () => {
     try {
       const response = await fetch(`${API_URL}/api/leads`);
@@ -432,6 +515,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       fetchCronJobs();
     } else if (activeTab === 'templates') {
       fetchDrafts();
+    } else if (activeTab === 'originated') {
+      fetchOriginatedLeads();
     }
   }, [activeTab]);
 
@@ -480,24 +565,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
-  const handleFetchSimilarWeb = async (id: string) => {
-    setFetchingSimilarWebIds(prev => ({ ...prev, [id]: true }));
-    try {
-      const response = await fetch(`${API_URL}/api/leads/${id}/similarweb`, {
-        method: 'POST'
-      });
-      if (response.ok) {
-        fetchLeads();
-      } else {
-        const err = await response.json();
-        alert(err.error || 'Failed to fetch SimilarWeb metrics.');
-      }
-    } catch (err) {
-      console.error('SimilarWeb fetch error:', err);
-    } finally {
-      setFetchingSimilarWebIds(prev => ({ ...prev, [id]: false }));
-    }
-  };
 
   const handleDeleteLead = async (id: string) => {
     if (!confirm('Are you sure you want to delete this lead and its logs?')) return;
@@ -778,6 +845,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             🎯 Targets Dashboard
           </button>
           <button 
+            className={`btn ${activeTab === 'originated' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setActiveTab('originated')}
+            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+          >
+            🌱 Originated Leads
+          </button>
+          <button 
             className={`btn ${activeTab === 'templates' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('templates')}
             style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
@@ -1009,7 +1083,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                         ...(lead.fetched_emails || [])
                       ]));
                       const isCrawling = crawlingIds[lead.id];
-                      const isFetchingSW = fetchingSimilarWebIds[lead.id];
 
                       return (
                         <tr key={lead.id} className={selectedLeadIds[lead.id] ? 'selected-row' : ''}>
@@ -1290,18 +1363,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                                 style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
                                 onClick={() => handleForceCrawl(lead.id)}
                                 disabled={isCrawling}
-                                title="Run merged status, emails and SimilarWeb checks"
+                                title="Run email crawl check"
                               >
                                 {isCrawling ? 'Crawling...' : 'Crawl'}
-                              </button>
-                              <button
-                                className="btn btn-secondary"
-                                style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
-                                onClick={() => handleFetchSimilarWeb(lead.id)}
-                                disabled={isFetchingSW}
-                                title="Scrape SimilarWeb visits & geography separately"
-                              >
-                                {isFetchingSW ? 'SW Fetch...' : 'SW'}
                               </button>
                               <button
                                 className="btn btn-primary"
@@ -1331,6 +1395,100 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             </div>
           </main>
         </div>
+      )}
+
+      {/* Originated Leads Tab */}
+      {activeTab === 'originated' && (
+        <main className="glass-panel" style={{ padding: '2rem', minHeight: '450px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+            <div>
+              <h2 className="card-title" style={{ margin: 0 }}>🌱 New Leads Originated</h2>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
+                These are competitor websites extracted from your uploaded sheets. Convert them to targets to trigger crawling and outreach.
+              </p>
+            </div>
+            <button 
+              className="btn btn-secondary" 
+              onClick={fetchOriginatedLeads} 
+              disabled={loadingOriginated}
+              style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+            >
+              Refresh
+            </button>
+          </div>
+
+          {loadingOriginated ? (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
+              Loading originated leads...
+            </div>
+          ) : originatedLeads.length === 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
+              <span style={{ fontSize: '2rem' }}>🌱</span>
+              <p style={{ marginTop: '0.5rem' }}>No originated leads found. Upload a sheet with a competitor column to discover new leads.</p>
+            </div>
+          ) : (
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Website / Domain</th>
+                    <th>Emerged From (Source)</th>
+                    <th>Found Date</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {originatedLeads.map((orig) => (
+                    <tr key={orig.id} className="animate-fade">
+                      <td>
+                        <a 
+                          href={`https://${orig.website}`} 
+                          target="_blank" 
+                          rel="noreferrer"
+                          style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}
+                        >
+                          {orig.website}
+                        </a>
+                      </td>
+                      <td>
+                        <span className="badge" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', padding: '0.2rem 0.6rem', borderRadius: '4px', fontSize: '0.8rem', color: 'var(--text-bright)' }}>
+                          {orig.source_website}
+                        </span>
+                      </td>
+                      <td style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                        {new Date(orig.created_at || Date.now()).toLocaleDateString(undefined, {
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </td>
+                      <td>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          <button 
+                            className="btn btn-primary"
+                            onClick={() => handleConvertOriginated(orig.id)}
+                            style={{ padding: '0.35rem 0.8rem', fontSize: '0.8rem' }}
+                          >
+                            🎯 Convert to Target
+                          </button>
+                          <button 
+                            className="btn btn-danger"
+                            onClick={() => handleDeleteOriginated(orig.id)}
+                            style={{ padding: '0.35rem 0.8rem', fontSize: '0.8rem', background: 'transparent', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#ef4444' }}
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </main>
       )}
 
       {/* Outreach Logs Tab */}

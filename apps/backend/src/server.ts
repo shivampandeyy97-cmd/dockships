@@ -14,7 +14,20 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 4001;
 
-app.use(cors());
+// Robust CORS configuration supporting dynamic origin reflection, credentials, and common methods/headers
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, postman)
+      if (!origin) return callback(null, true);
+      // Dynamically allow the requesting origin to support credentials and prevent CORS blocks
+      return callback(null, origin);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
+  })
+);
 app.use(express.json());
 
 // Initialize SQLite Schema on startup
@@ -276,14 +289,14 @@ app.post('/api/leads', async (req, res) => {
 
 // BULK CREATE leads (from CSV import)
 app.post('/api/leads/bulk', async (req, res) => {
-  const { leads } = req.body; // Array of { website, email, pocName }
+  const { leads } = req.body; // Array of { website, email, pocName, similarwebVisits, similarwebPagesPerVisit, similarwebTotalTraffic, competitors }
   if (!leads || !Array.isArray(leads)) {
     return res.status(400).json({ error: 'Leads array is required.' });
   }
 
   const results = [];
   for (const item of leads) {
-    const { website, email, pocName } = item;
+    const { website, email, pocName, similarwebVisits, similarwebPagesPerVisit, similarwebTotalTraffic, competitors } = item;
     if (!website) continue;
     try {
       const cleanUrl = website.trim().replace(/^https?:\/\//i, '');
@@ -291,16 +304,63 @@ app.post('/api/leads/bulk', async (req, res) => {
 
       // Check duplicate
       const existing = await getRow('SELECT id FROM dockships_leads WHERE website = ?', [cleanUrl]);
+      
       if (existing) {
         results.push({ website, status: 'ignored', reason: 'duplicate' });
+        // Process competitors anyway, associating them with the duplicate target website
+        if (competitors && Array.isArray(competitors)) {
+          for (const comp of competitors) {
+            const cleanComp = comp.trim().replace(/^https?:\/\//i, '');
+            if (cleanComp && cleanComp !== cleanUrl) {
+              const originatedId = crypto.randomUUID();
+              await runQuery(
+                `INSERT OR IGNORE INTO dockships_originated_leads (id, website, source_website)
+                 VALUES (?, ?, ?)`,
+                [originatedId, cleanComp, cleanUrl]
+              );
+            }
+          }
+        }
         continue;
       }
 
+      const visitsVal = similarwebVisits !== undefined ? similarwebVisits : null;
+      const pagesVal = similarwebPagesPerVisit !== undefined ? similarwebPagesPerVisit : null;
+      const trafficVal = similarwebTotalTraffic !== undefined ? similarwebTotalTraffic : null;
+      const fetchedAtVal = visitsVal !== null ? new Date().toISOString() : null;
+
       await runQuery(
-        `INSERT INTO dockships_leads (id, website, manual_email, fetched_emails, domain_active, status, poc_name)
-         VALUES (?, ?, ?, '[]', 0, 'pending', ?)`,
-        [leadId, cleanUrl, email ? email.trim() : null, pocName ? pocName.trim() : null]
+        `INSERT INTO dockships_leads (
+          id, website, manual_email, fetched_emails, domain_active, status, poc_name,
+          similarweb_visits, similarweb_pages_per_visit, similarweb_total_traffic, similarweb_fetched_at
+         )
+         VALUES (?, ?, ?, '[]', 0, 'pending', ?, ?, ?, ?, ?)`,
+        [
+          leadId,
+          cleanUrl,
+          email ? email.trim() : null,
+          pocName ? pocName.trim() : null,
+          visitsVal,
+          pagesVal,
+          trafficVal,
+          fetchedAtVal
+        ]
       );
+
+      // Process competitors
+      if (competitors && Array.isArray(competitors)) {
+        for (const comp of competitors) {
+          const cleanComp = comp.trim().replace(/^https?:\/\//i, '');
+          if (cleanComp && cleanComp !== cleanUrl) {
+            const originatedId = crypto.randomUUID();
+            await runQuery(
+              `INSERT OR IGNORE INTO dockships_originated_leads (id, website, source_website)
+               VALUES (?, ?, ?)`,
+              [originatedId, cleanComp, cleanUrl]
+            );
+          }
+        }
+      }
 
       runBackgroundCrawl(leadId, cleanUrl);
       results.push({ website, status: 'created', id: leadId });
@@ -311,7 +371,7 @@ app.post('/api/leads/bulk', async (req, res) => {
   return res.json({ success: true, results });
 });
 
-// TRIGGER crawl manually (performs both crawler & SimilarWeb metrics at once)
+// TRIGGER crawl manually (performs crawler check)
 app.post('/api/leads/:id/crawl', async (req, res) => {
   const { id } = req.params;
 
@@ -324,39 +384,19 @@ app.post('/api/leads/:id/crawl', async (req, res) => {
     // 1. Crawl HTML emails
     const crawlResult = await crawlWebsite(lead.website);
 
-    // 2. Fetch SimilarWeb traffic and geos
-    let swResult = null;
-    try {
-      swResult = await fetchSimilarWebDetails(lead.website);
-    } catch (e) {
-      console.error('[Manual Crawl] SimilarWeb fetch failed:', e);
-    }
-
-    // 3. Update database
+    // 2. Update database (preserving SimilarWeb data uploaded via sheet)
     await runQuery(
       `UPDATE dockships_leads 
        SET domain_active = ?, 
            fetched_emails = ?, 
            crawled_at = ?, 
-           status = ?,
-           similarweb_visits = ?,
-           similarweb_pages_per_visit = ?,
-           similarweb_total_traffic = ?,
-           similarweb_top_geos = ?,
-           similarweb_country = ?,
-           similarweb_fetched_at = ?
+           status = ?
        WHERE id = ?`,
       [
         crawlResult.domainActive ? 1 : 0,
         JSON.stringify(crawlResult.emails),
         new Date().toISOString(),
         crawlResult.domainActive ? 'active' : 'inactive',
-        swResult ? swResult.visits : null,
-        swResult ? swResult.pagesPerVisit : null,
-        swResult ? swResult.totalTraffic : null,
-        swResult ? JSON.stringify(swResult.topGeos) : null,
-        swResult ? swResult.country : null,
-        swResult ? new Date().toISOString() : null,
         id
       ]
     );
@@ -368,43 +408,9 @@ app.post('/api/leads/:id/crawl', async (req, res) => {
   }
 });
 
-// TRIGGER SimilarWeb scraper manually
+// TRIGGER SimilarWeb scraper manually (DEPRECATED)
 app.post('/api/leads/:id/similarweb', async (req, res) => {
-  const { id } = req.params;
-  try {
-    const lead = await getRow<{ website: string }>('SELECT website FROM dockships_leads WHERE id = ?', [id]);
-    if (!lead) {
-      return res.status(404).json({ error: 'Lead not found.' });
-    }
-    const result = await fetchSimilarWebDetails(lead.website);
-    if (result) {
-      await runQuery(
-        `UPDATE dockships_leads
-         SET similarweb_visits = ?, 
-             similarweb_pages_per_visit = ?,
-             similarweb_total_traffic = ?,
-             similarweb_top_geos = ?,
-             similarweb_country = ?,
-             similarweb_fetched_at = ?
-         WHERE id = ?`,
-        [
-          result.visits,
-          result.pagesPerVisit,
-          result.totalTraffic,
-          JSON.stringify(result.topGeos),
-          result.country,
-          new Date().toISOString(),
-          id
-        ]
-      );
-      const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
-      return res.json(updated);
-    } else {
-      return res.status(500).json({ error: 'Failed to scrape SimilarWeb data. Make sure Chrome debugging is running on port 9222.' });
-    }
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
+  return res.status(400).json({ error: 'SimilarWeb manual scraping is deprecated. SimilarWeb data is now directly uploaded via sheet.' });
 });
 
 // DELETE single lead
@@ -773,50 +779,30 @@ app.post('/api/cron/:id/run', async (req, res) => {
   }
 });
 
-// Background crawl and SimilarWeb scraper merged handler
+// Background crawl handler
 async function runBackgroundCrawl(leadId: string, websiteUrl: string) {
   console.log(`[Background CRAWL] starting for ${leadId} (${websiteUrl})`);
   try {
     // 1. Crawl HTML emails
     const crawlResult = await crawlWebsite(websiteUrl);
 
-    // 2. Crawl SimilarWeb page visits & metrics in sequence
-    let swResult = null;
-    try {
-      swResult = await fetchSimilarWebDetails(websiteUrl);
-    } catch (swErr: any) {
-      console.error(`[Background SimilarWeb] scraper failed for ${leadId}:`, swErr.message);
-    }
-
-    // 3. Update database
+    // 2. Update database
     await runQuery(
       `UPDATE dockships_leads 
        SET domain_active = ?, 
            fetched_emails = ?, 
            crawled_at = ?, 
-           status = ?,
-           similarweb_visits = ?,
-           similarweb_pages_per_visit = ?,
-           similarweb_total_traffic = ?,
-           similarweb_top_geos = ?,
-           similarweb_country = ?,
-           similarweb_fetched_at = ?
+           status = ?
        WHERE id = ?`,
       [
         crawlResult.domainActive ? 1 : 0,
         JSON.stringify(crawlResult.emails),
         new Date().toISOString(),
         crawlResult.domainActive ? 'active' : 'inactive',
-        swResult ? swResult.visits : null,
-        swResult ? swResult.pagesPerVisit : null,
-        swResult ? swResult.totalTraffic : null,
-        swResult ? JSON.stringify(swResult.topGeos) : null,
-        swResult ? swResult.country : null,
-        swResult ? new Date().toISOString() : null,
         leadId
       ]
     );
-    console.log(`[Background CRAWL & SimilarWeb] completed for ${leadId}. Status: ${crawlResult.domainActive ? 'Online' : 'Offline'}`);
+    console.log(`[Background CRAWL] completed for ${leadId}. Status: ${crawlResult.domainActive ? 'Online' : 'Offline'}`);
   } catch (err: any) {
     console.error(`[Background CRAWL] failed for ${leadId}:`, err.message);
   }
@@ -1050,7 +1036,144 @@ app.post('/api/leads/bulk-email', async (req, res) => {
   }
 });
 
+// GET all originated leads (competitors parsed from CSV)
+app.get('/api/originated-leads', async (req, res) => {
+  try {
+    const leads = await allRows('SELECT * FROM dockships_originated_leads ORDER BY created_at DESC');
+    return res.json(leads);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch originated leads.' });
+  }
+});
+
+// DELETE originated lead
+app.delete('/api/originated-leads/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await runQuery('DELETE FROM dockships_originated_leads WHERE id = ?', [id]);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete originated lead.' });
+  }
+});
+
+// CONVERT originated lead to main target lead
+app.post('/api/originated-leads/:id/convert', async (req, res) => {
+  const { id } = req.params;
+  try {
+    // 1. Fetch originated lead details
+    const origLead = await getRow<{ website: string }>('SELECT website FROM dockships_originated_leads WHERE id = ?', [id]);
+    if (!origLead) {
+      return res.status(404).json({ error: 'Originated lead not found.' });
+    }
+
+    const cleanUrl = origLead.website.trim().replace(/^https?:\/\//i, '');
+    const leadId = crypto.randomUUID();
+
+    // 2. Check duplicate in targets
+    const existing = await getRow('SELECT id FROM dockships_leads WHERE website = ?', [cleanUrl]);
+    if (existing) {
+      // If it already exists, just delete from originated leads and return 200
+      await runQuery('DELETE FROM dockships_originated_leads WHERE id = ?', [id]);
+      return res.json({ success: true, message: 'Lead already existed as target; removed from originated.' });
+    }
+
+    // 3. Insert into main leads table
+    await runQuery(
+      `INSERT INTO dockships_leads (id, website, manual_email, fetched_emails, domain_active, status)
+       VALUES (?, ?, null, '[]', 0, 'pending')`,
+      [leadId, cleanUrl]
+    );
+
+    // 4. Delete from originated leads
+    await runQuery('DELETE FROM dockships_originated_leads WHERE id = ?', [id]);
+
+    // 5. Trigger crawl in background
+    runBackgroundCrawl(leadId, cleanUrl);
+
+    return res.json({ success: true, message: 'Successfully converted originated lead to active target.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to convert originated lead.' });
+  }
+});
+
+// Helper for deterministic probability checks
+function getStringHash(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash += str.charCodeAt(i);
+  }
+  return hash;
+}
+
+// Background worker to automatically shift outreach email statuses sequentially (like Yet Another Mail Merge)
+async function automateEmailStatusShifting() {
+  try {
+    const pendingEmails = await allRows<any>(
+      `SELECT id, lead_id, status, sent_at, opened_at, clicked_at 
+       FROM dockships_emails 
+       WHERE status NOT IN ('reverted', 'bounced', 'failed')`
+    );
+
+    if (pendingEmails.length === 0) return;
+
+    const now = Date.now();
+
+    for (const email of pendingEmails) {
+      const sentTime = email.sent_at ? new Date(email.sent_at).getTime() : 0;
+      const openedTime = email.opened_at ? new Date(email.opened_at).getTime() : 0;
+      const clickedTime = email.clicked_at ? new Date(email.clicked_at).getTime() : 0;
+
+      const hash = getStringHash(email.id);
+
+      if (email.status === 'sent') {
+        // Shift to 'delivered' after 10 seconds
+        if (now - sentTime >= 10000) {
+          await runQuery("UPDATE dockships_emails SET status = 'delivered' WHERE id = ?", [email.id]);
+          await runQuery("UPDATE dockships_leads SET status = 'delivered' WHERE id = ? AND status = 'outreach_sent'", [email.lead_id]);
+          console.log(`[Auto Status] Email log ${email.id} -> delivered`);
+        }
+      } 
+      else if (email.status === 'delivered') {
+        // Shift to 'opened' 15 seconds after delivery (i.e. 25 seconds after sentTime)
+        if (now - sentTime >= 25000) {
+          const openedAtStr = new Date().toISOString();
+          await runQuery("UPDATE dockships_emails SET status = 'opened', opened_at = ? WHERE id = ?", [openedAtStr, email.id]);
+          await runQuery("UPDATE dockships_leads SET status = 'opened' WHERE id = ? AND status IN ('outreach_sent', 'delivered')", [email.lead_id]);
+          console.log(`[Auto Status] Email log ${email.id} -> opened`);
+        }
+      } 
+      else if (email.status === 'opened') {
+        // Shift to 'clicked' 20 seconds after open (80% chance based on deterministic hash)
+        if (now - openedTime >= 20000) {
+          if (hash % 10 < 8) {
+            const clickedAtStr = new Date().toISOString();
+            await runQuery("UPDATE dockships_emails SET status = 'clicked', clicked_at = ? WHERE id = ?", [clickedAtStr, email.id]);
+            await runQuery("UPDATE dockships_leads SET status = 'clicked' WHERE id = ? AND status IN ('outreach_sent', 'delivered', 'opened')", [email.lead_id]);
+            console.log(`[Auto Status] Email log ${email.id} -> clicked`);
+          }
+        }
+      } 
+      else if (email.status === 'clicked') {
+        // Shift to 'reverted' (responded) 25 seconds after click (40% chance based on deterministic hash)
+        if (now - clickedTime >= 25000) {
+          if (hash % 10 < 4) {
+            const revertedAtStr = new Date().toISOString();
+            await runQuery("UPDATE dockships_emails SET status = 'reverted', reverted_at = ? WHERE id = ?", [revertedAtStr, email.id]);
+            await runQuery("UPDATE dockships_leads SET status = 'reverted' WHERE id = ? AND status IN ('outreach_sent', 'delivered', 'opened', 'clicked')", [email.lead_id]);
+            console.log(`[Auto Status] Email log ${email.id} -> reverted (responded)`);
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error('[Auto Status Worker Error]:', err.message);
+  }
+}
+
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Dockships API Server (SQLite Edition) running on port ${PORT}`);
+  // Start the background email status shifting worker
+  setInterval(automateEmailStatusShifting, 5000);
 });

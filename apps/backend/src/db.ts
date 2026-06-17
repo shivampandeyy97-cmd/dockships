@@ -139,6 +139,17 @@ export function initializeSchema(): Promise<void> {
           );
         `);
 
+        // Originated Leads (competitors from sheet) table
+        await runQuery(`
+          CREATE TABLE IF NOT EXISTS dockships_originated_leads (
+            id TEXT PRIMARY KEY,
+            website TEXT NOT NULL,
+            source_website TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(website, source_website)
+          );
+        `);
+
         // Migration block: Add columns to existing table if they don't exist
         try {
           await runQuery('ALTER TABLE dockships_smtp_settings ADD COLUMN mailgun_api_key TEXT;');
