@@ -102,7 +102,11 @@ export function initializeSchema(): Promise<void> {
     return (async () => {
       try {
         // Enable foreign keys
-        await runQuery('PRAGMA foreign_keys = ON;');
+        try {
+          await runQuery('PRAGMA foreign_keys = ON;');
+        } catch (pragmaErr) {
+          console.warn('Warning: PRAGMA foreign_keys = ON failed on Turso:', pragmaErr);
+        }
         
         // Users table
         await runQuery(`
@@ -216,7 +220,11 @@ export function initializeSchema(): Promise<void> {
       db!.serialize(async () => {
         try {
           // Enable foreign keys
-          await runQuery('PRAGMA foreign_keys = ON;');
+          try {
+            await runQuery('PRAGMA foreign_keys = ON;');
+          } catch (pragmaErr) {
+            console.warn('Warning: PRAGMA foreign_keys = ON failed on SQLite:', pragmaErr);
+          }
 
           // Users table
           await runQuery(`
