@@ -163,7 +163,7 @@ export async function fetchSimilarWebDetails(domain: string): Promise<SimilarWeb
     console.log('[SimilarWeb Scraper] Chrome remote debugging websocket not reachable. Launching headful fallback...');
     try {
       browser = await puppeteer.launch({
-        headless: false,
+        headless: true,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',

@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import path from 'path';
 import { initializeSchema, runQuery, getRow, allRows } from './db';
 import { crawlWebsite } from './services/crawler';
 import { sendOutreachEmail } from './services/email';
@@ -1170,6 +1171,18 @@ async function automateEmailStatusShifting() {
     console.error('[Auto Status Worker Error]:', err.message);
   }
 }
+
+// Serve frontend static assets in production
+const frontendBuildPath = path.resolve(__dirname, '../../frontend/dist');
+app.use(express.static(frontendBuildPath));
+
+// Fallback all other routes to React index.html for SPA routing
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) {
+    return next();
+  }
+  res.sendFile(path.join(frontendBuildPath, 'index.html'));
+});
 
 // Start server
 app.listen(PORT, () => {
