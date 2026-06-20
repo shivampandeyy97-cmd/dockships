@@ -509,15 +509,24 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   }, []);
 
   useEffect(() => {
+    let interval: any;
+
     if (activeTab === 'logs') {
       fetchLogs();
+      interval = setInterval(fetchLogs, 5000);
     } else if (activeTab === 'cron') {
       fetchCronJobs();
+      interval = setInterval(fetchCronJobs, 5000);
     } else if (activeTab === 'templates') {
       fetchDrafts();
     } else if (activeTab === 'originated') {
       fetchOriginatedLeads();
+      interval = setInterval(fetchOriginatedLeads, 5000);
     }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, [activeTab]);
 
   const handleAddLead = async (e: React.FormEvent) => {
@@ -1964,6 +1973,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           userId={user.id}
           onClose={() => setActiveLeadForOutreach(null)}
           onSent={fetchLeads}
+          drafts={drafts}
         />
       )}
 

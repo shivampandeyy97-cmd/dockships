@@ -1176,11 +1176,19 @@ async function automateEmailStatusShifting() {
       const hash = getStringHash(email.id);
 
       if (email.status === 'sent') {
-        // Shift to 'delivered' after 10 seconds
+        // Shift to 'delivered' or 'bounced' after 10 seconds
         if (now - sentTime >= 10000) {
-          await runQuery("UPDATE dockships_emails SET status = 'delivered' WHERE id = ?", [email.id]);
-          await runQuery("UPDATE dockships_leads SET status = 'delivered' WHERE id = ? AND status = 'outreach_sent'", [email.lead_id]);
-          console.log(`[Auto Status] Email log ${email.id} -> delivered`);
+          if (hash % 10 < 2) {
+            // 20% chance of bounce
+            await runQuery("UPDATE dockships_emails SET status = 'bounced' WHERE id = ?", [email.id]);
+            await runQuery("UPDATE dockships_leads SET status = 'bounced' WHERE id = ?", [email.lead_id]);
+            console.log(`[Auto Status] Email log ${email.id} -> bounced`);
+          } else {
+            // 80% chance of successful delivery
+            await runQuery("UPDATE dockships_emails SET status = 'delivered' WHERE id = ?", [email.id]);
+            await runQuery("UPDATE dockships_leads SET status = 'delivered' WHERE id = ? AND status = 'outreach_sent'", [email.lead_id]);
+            console.log(`[Auto Status] Email log ${email.id} -> delivered`);
+          }
         }
       } 
       else if (email.status === 'delivered') {
@@ -1193,9 +1201,16 @@ async function automateEmailStatusShifting() {
         }
       } 
       else if (email.status === 'opened') {
-        // Shift to 'clicked' 20 seconds after open (80% chance based on deterministic hash)
+        // Shift to 'reverted' (replied) or 'clicked' 20 seconds after open
         if (now - openedTime >= 20000) {
-          if (hash % 10 < 8) {
+          if (hash % 10 < 4) {
+            // 40% chance of direct reply
+            const revertedAtStr = new Date().toISOString();
+            await runQuery("UPDATE dockships_emails SET status = 'reverted', reverted_at = ? WHERE id = ?", [revertedAtStr, email.id]);
+            await runQuery("UPDATE dockships_leads SET status = 'reverted' WHERE id = ? AND status IN ('outreach_sent', 'delivered', 'opened')", [email.lead_id]);
+            console.log(`[Auto Status] Email log ${email.id} -> reverted (replied)`);
+          } else if (hash % 10 < 8) {
+            // 40% chance of click (which will lead to reply later)
             const clickedAtStr = new Date().toISOString();
             await runQuery("UPDATE dockships_emails SET status = 'clicked', clicked_at = ? WHERE id = ?", [clickedAtStr, email.id]);
             await runQuery("UPDATE dockships_leads SET status = 'clicked' WHERE id = ? AND status IN ('outreach_sent', 'delivered', 'opened')", [email.lead_id]);
@@ -1204,13 +1219,13 @@ async function automateEmailStatusShifting() {
         }
       } 
       else if (email.status === 'clicked') {
-        // Shift to 'reverted' (responded) 25 seconds after click (40% chance based on deterministic hash)
-        if (now - clickedTime >= 25000) {
-          if (hash % 10 < 4) {
+        // Shift to 'reverted' (replied) 20 seconds after click (70% chance)
+        if (now - clickedTime >= 20000) {
+          if (hash % 10 < 7) {
             const revertedAtStr = new Date().toISOString();
             await runQuery("UPDATE dockships_emails SET status = 'reverted', reverted_at = ? WHERE id = ?", [revertedAtStr, email.id]);
             await runQuery("UPDATE dockships_leads SET status = 'reverted' WHERE id = ? AND status IN ('outreach_sent', 'delivered', 'opened', 'clicked')", [email.lead_id]);
-            console.log(`[Auto Status] Email log ${email.id} -> reverted (responded)`);
+            console.log(`[Auto Status] Email log ${email.id} -> reverted (replied after click)`);
           }
         }
       }

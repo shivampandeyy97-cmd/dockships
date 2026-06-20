@@ -8,6 +8,7 @@ interface Lead {
   fetched_emails: string[];
   domain_active: boolean;
   status: string;
+  poc_name?: string;
 }
 
 interface OutreachComposerProps {
@@ -15,9 +16,10 @@ interface OutreachComposerProps {
   userId: string;
   onClose: () => void;
   onSent: () => void;
+  drafts?: Array<{ id: string; subject: string; body: string }>;
 }
 
-export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId, onClose, onSent }) => {
+export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId, onClose, onSent, drafts }) => {
   const [tempEmails, setTempEmails] = useState<string[]>([]);
   const [customEmailInput, setCustomEmailInput] = useState('');
   const [selectedRecipients, setSelectedRecipients] = useState<string[]>(() => {
@@ -33,6 +35,31 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
   const [body, setBody] = useState(
     `<p>Hello,</p>\n<p>I hope you are doing well.</p>\n<p>I visited your website <strong>${lead.website}</strong> and really liked your platform. I would love to connect and discuss potential partnership opportunities.</p>\n<p>Best regards,</p>\n<p>Sales Team</p>`
   );
+
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+
+  const handleTemplateChange = (templateId: string) => {
+    setSelectedTemplateId(templateId);
+    if (!templateId) {
+      setSubject(`Outreach Partnership Proposal — ${lead.website}`);
+      setBody(
+        `<p>Hello,</p>\n<p>I hope you are doing well.</p>\n<p>I visited your website <strong>${lead.website}</strong> and really liked your platform. I would love to connect and discuss potential partnership opportunities.</p>\n<p>Best regards,</p>\n<p>Sales Team</p>`
+      );
+      return;
+    }
+    const selected = drafts?.find((d) => d.id === templateId);
+    if (selected) {
+      const pocName = lead.poc_name || 'Team';
+      const replacedSubject = selected.subject
+        .replace(/\{\{website\}\}/g, lead.website)
+        .replace(/\{\{poc\}\}/g, pocName);
+      const replacedBody = selected.body
+        .replace(/\{\{website\}\}/g, lead.website)
+        .replace(/\{\{poc\}\}/g, pocName);
+      setSubject(replacedSubject);
+      setBody(replacedBody);
+    }
+  };
 
   // Custom Gmail config fields (if service is 'gmail')
   const [gmailUser, setGmailUser] = useState('');
@@ -253,6 +280,26 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
               </button>
             </div>
           </div>
+
+          {/* Template Selector Dropdown */}
+          {drafts && drafts.length > 0 && (
+            <div className="form-group">
+              <label className="form-label">Select Saved Draft Template</label>
+              <select
+                className="form-control"
+                value={selectedTemplateId}
+                onChange={(e) => handleTemplateChange(e.target.value)}
+                disabled={loading}
+              >
+                <option value="">-- No Template Selected (Use Default) --</option>
+                {drafts.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.subject}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="form-group">
             <label className="form-label">Subject</label>
