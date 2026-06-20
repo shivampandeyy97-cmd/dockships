@@ -49,6 +49,44 @@ function verifyMailgunSignature(apiKey: string, token: string, timestamp: string
   return hash === signature;
 }
 
+// Database diagnostics endpoint
+app.get('/api/db-status', async (req, res) => {
+  try {
+    const isTurso = !!process.env.TURSO_DATABASE_URL;
+    const dbPath = process.env.DATABASE_PATH || 'default';
+    
+    // Check tables
+    let tables: string[] = [];
+    try {
+      const rows = await allRows<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+      );
+      tables = rows.map(r => r.name);
+    } catch (e: any) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to query sqlite_master: ' + e.message,
+        isTurso,
+        dbPath
+      });
+    }
+
+    return res.json({
+      success: true,
+      isTurso,
+      dbPath,
+      tables,
+      envKeysPresent: {
+        TURSO_DATABASE_URL: !!process.env.TURSO_DATABASE_URL,
+        TURSO_AUTH_TOKEN: !!process.env.TURSO_AUTH_TOKEN,
+        DATABASE_PATH: !!process.env.DATABASE_PATH
+      }
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // AUTH Signup Route
 app.post('/api/auth/signup', async (req, res) => {
   const { email, password } = req.body;

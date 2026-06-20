@@ -97,244 +97,120 @@ export function allRows<T>(sql: string, params: any[] = []): Promise<T[]> {
 }
 
 // Table schema initialization
-export function initializeSchema(): Promise<void> {
-  if (isTurso) {
-    return (async () => {
-      try {
-        // Enable foreign keys
-        try {
-          await runQuery('PRAGMA foreign_keys = ON;');
-        } catch (pragmaErr) {
-          console.warn('Warning: PRAGMA foreign_keys = ON failed on Turso:', pragmaErr);
-        }
-        
-        // Users table
-        await runQuery(`
-          CREATE TABLE IF NOT EXISTS dockships_users (
-            id TEXT PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now'))
-          );
-        `);
+export async function initializeSchema(): Promise<void> {
+  try {
+    // Enable foreign keys
+    try {
+      await runQuery('PRAGMA foreign_keys = ON;');
+    } catch (pragmaErr) {
+      console.warn('Warning: PRAGMA foreign_keys = ON failed:', pragmaErr);
+    }
+    
+    // Users table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
 
-        // Leads table
-        await runQuery(`
-          CREATE TABLE IF NOT EXISTS dockships_leads (
-            id TEXT PRIMARY KEY,
-            website TEXT UNIQUE NOT NULL,
-            manual_email TEXT,
-            fetched_emails TEXT DEFAULT '[]',
-            domain_active INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'pending',
-            crawled_at TEXT,
-            poc_name TEXT,
-            similarweb_visits INTEGER,
-            similarweb_pages_per_visit REAL,
-            similarweb_total_traffic REAL,
-            similarweb_top_geos TEXT,
-            similarweb_country TEXT,
-            similarweb_fetched_at TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-          );
-        `);
+    // Leads table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_leads (
+        id TEXT PRIMARY KEY,
+        website TEXT UNIQUE NOT NULL,
+        manual_email TEXT,
+        fetched_emails TEXT DEFAULT '[]',
+        domain_active INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        crawled_at TEXT,
+        poc_name TEXT,
+        similarweb_visits INTEGER,
+        similarweb_pages_per_visit REAL,
+        similarweb_total_traffic REAL,
+        similarweb_top_geos TEXT,
+        similarweb_country TEXT,
+        similarweb_fetched_at TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
 
-        // Emails table
-        await runQuery(`
-          CREATE TABLE IF NOT EXISTS dockships_emails (
-            id TEXT PRIMARY KEY,
-            lead_id TEXT,
-            recipient_email TEXT NOT NULL,
-            subject TEXT NOT NULL,
-            body TEXT NOT NULL,
-            status TEXT DEFAULT 'sent',
-            sent_at TEXT DEFAULT (datetime('now')),
-            opened_at TEXT,
-            clicked_at TEXT,
-            reverted_at TEXT,
-            FOREIGN KEY (lead_id) REFERENCES dockships_leads(id) ON DELETE CASCADE
-          );
-        `);
+    // Emails table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_emails (
+        id TEXT PRIMARY KEY,
+        lead_id TEXT,
+        recipient_email TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT DEFAULT 'sent',
+        sent_at TEXT DEFAULT (datetime('now')),
+        opened_at TEXT,
+        clicked_at TEXT,
+        reverted_at TEXT,
+        FOREIGN KEY (lead_id) REFERENCES dockships_leads(id) ON DELETE CASCADE
+      );
+    `);
 
-        // SMTP and Mailgun Settings table
-        await runQuery(`
-          CREATE TABLE IF NOT EXISTS dockships_smtp_settings (
-            user_id TEXT PRIMARY KEY,
-            host TEXT,
-            port INTEGER,
-            username TEXT,
-            password TEXT,
-            sender_name TEXT,
-            sender_email TEXT NOT NULL,
-            mailgun_api_key TEXT,
-            mailgun_domain TEXT,
-            active_service TEXT DEFAULT 'smtp',
-            FOREIGN KEY (user_id) REFERENCES dockships_users(id) ON DELETE CASCADE
-          );
-        `);
+    // SMTP and Mailgun Settings table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_smtp_settings (
+        user_id TEXT PRIMARY KEY,
+        host TEXT,
+        port INTEGER,
+        username TEXT,
+        password TEXT,
+        sender_name TEXT,
+        sender_email TEXT NOT NULL,
+        mailgun_api_key TEXT,
+        mailgun_domain TEXT,
+        active_service TEXT DEFAULT 'smtp',
+        FOREIGN KEY (user_id) REFERENCES dockships_users(id) ON DELETE CASCADE
+      );
+    `);
 
-        // Cron Jobs table
-        await runQuery(`
-          CREATE TABLE IF NOT EXISTS dockships_cron_jobs (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            expression TEXT NOT NULL,
-            job_type TEXT NOT NULL,
-            active INTEGER DEFAULT 1,
-            last_run TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-          );
-        `);
+    // Cron Jobs table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_cron_jobs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        expression TEXT NOT NULL,
+        job_type TEXT NOT NULL,
+        active INTEGER DEFAULT 1,
+        last_run TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
 
-        // Drafts table
-        await runQuery(`
-          CREATE TABLE IF NOT EXISTS dockships_drafts (
-            id TEXT PRIMARY KEY,
-            subject TEXT NOT NULL,
-            body TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now'))
-          );
-        `);
+    // Drafts table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_drafts (
+        id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
 
-        // Originated Leads table
-        await runQuery(`
-          CREATE TABLE IF NOT EXISTS dockships_originated_leads (
-            id TEXT PRIMARY KEY,
-            website TEXT NOT NULL,
-            source_website TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(website, source_website)
-          );
-        `);
+    // Originated Leads table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_originated_leads (
+        id TEXT PRIMARY KEY,
+        website TEXT NOT NULL,
+        source_website TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(website, source_website)
+      );
+    `);
 
-        await runMigrations();
-        await seedDefaultData();
-        console.log('Database tables successfully initialized on Turso.');
-      } catch (err) {
-        console.error('Error initializing database schema on Turso:', err);
-        throw err;
-      }
-    })();
-  } else {
-    return new Promise((resolve, reject) => {
-      db!.serialize(async () => {
-        try {
-          // Enable foreign keys
-          try {
-            await runQuery('PRAGMA foreign_keys = ON;');
-          } catch (pragmaErr) {
-            console.warn('Warning: PRAGMA foreign_keys = ON failed on SQLite:', pragmaErr);
-          }
-
-          // Users table
-          await runQuery(`
-            CREATE TABLE IF NOT EXISTS dockships_users (
-              id TEXT PRIMARY KEY,
-              email TEXT UNIQUE NOT NULL,
-              password TEXT NOT NULL,
-              created_at TEXT DEFAULT (datetime('now'))
-            );
-          `);
-
-          // Leads table
-          await runQuery(`
-            CREATE TABLE IF NOT EXISTS dockships_leads (
-              id TEXT PRIMARY KEY,
-              website TEXT UNIQUE NOT NULL,
-              manual_email TEXT,
-              fetched_emails TEXT DEFAULT '[]',
-              domain_active INTEGER DEFAULT 0,
-              status TEXT DEFAULT 'pending',
-              crawled_at TEXT,
-              poc_name TEXT,
-              similarweb_visits INTEGER,
-              similarweb_pages_per_visit REAL,
-              similarweb_total_traffic REAL,
-              similarweb_top_geos TEXT,
-              similarweb_country TEXT,
-              similarweb_fetched_at TEXT,
-              created_at TEXT DEFAULT (datetime('now'))
-            );
-          `);
-
-          // Emails table
-          await runQuery(`
-            CREATE TABLE IF NOT EXISTS dockships_emails (
-              id TEXT PRIMARY KEY,
-              lead_id TEXT,
-              recipient_email TEXT NOT NULL,
-              subject TEXT NOT NULL,
-              body TEXT NOT NULL,
-              status TEXT DEFAULT 'sent',
-              sent_at TEXT DEFAULT (datetime('now')),
-              opened_at TEXT,
-              clicked_at TEXT,
-              reverted_at TEXT,
-              FOREIGN KEY (lead_id) REFERENCES dockships_leads(id) ON DELETE CASCADE
-            );
-          `);
-
-          // SMTP and Mailgun Settings table
-          await runQuery(`
-            CREATE TABLE IF NOT EXISTS dockships_smtp_settings (
-              user_id TEXT PRIMARY KEY,
-              host TEXT,
-              port INTEGER,
-              username TEXT,
-              password TEXT,
-              sender_name TEXT,
-              sender_email TEXT NOT NULL,
-              mailgun_api_key TEXT,
-              mailgun_domain TEXT,
-              active_service TEXT DEFAULT 'smtp',
-              FOREIGN KEY (user_id) REFERENCES dockships_users(id) ON DELETE CASCADE
-            );
-          `);
-
-          // Cron Jobs table
-          await runQuery(`
-            CREATE TABLE IF NOT EXISTS dockships_cron_jobs (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              expression TEXT NOT NULL,
-              job_type TEXT NOT NULL,
-              active INTEGER DEFAULT 1,
-              last_run TEXT,
-              created_at TEXT DEFAULT (datetime('now'))
-            );
-          `);
-
-          // Drafts table
-          await runQuery(`
-            CREATE TABLE IF NOT EXISTS dockships_drafts (
-              id TEXT PRIMARY KEY,
-              subject TEXT NOT NULL,
-              body TEXT NOT NULL,
-              created_at TEXT DEFAULT (datetime('now'))
-            );
-          `);
-
-          // Originated Leads table
-          await runQuery(`
-            CREATE TABLE IF NOT EXISTS dockships_originated_leads (
-              id TEXT PRIMARY KEY,
-              website TEXT NOT NULL,
-              source_website TEXT NOT NULL,
-              created_at TEXT DEFAULT (datetime('now')),
-              UNIQUE(website, source_website)
-            );
-          `);
-
-          await runMigrations();
-          await seedDefaultData();
-          console.log('Database tables successfully initialized on local SQLite.');
-          resolve();
-        } catch (err) {
-          console.error('Error initializing SQLite schema:', err);
-          reject(err);
-        }
-      });
-    });
+    await runMigrations();
+    await seedDefaultData();
+    console.log(`Database tables successfully initialized (${isTurso ? 'Turso' : 'local SQLite'}).`);
+  } catch (err) {
+    console.error('Error initializing database schema:', err);
+    throw err;
   }
 }
 
