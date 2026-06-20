@@ -87,6 +87,16 @@ app.get('/api/db-status', async (req, res) => {
   }
 });
 
+// Manual database schema initialization trigger
+app.get('/api/init-db', async (req, res) => {
+  try {
+    await initializeSchema();
+    return res.json({ success: true, message: 'Database schema initialized successfully!' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message, stack: err.stack });
+  }
+});
+
 // AUTH Signup Route
 app.post('/api/auth/signup', async (req, res) => {
   const { email, password } = req.body;
