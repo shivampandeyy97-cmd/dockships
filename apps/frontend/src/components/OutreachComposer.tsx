@@ -6,7 +6,6 @@ interface Lead {
   website: string;
   manual_email?: string;
   fetched_emails: string[];
-  domain_active: boolean;
   status: string;
   poc_name?: string;
 }
