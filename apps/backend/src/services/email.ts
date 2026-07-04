@@ -120,15 +120,23 @@ export async function sendOutreachEmail(
     // Subcase 2B: Standard SMTP Dispatcher (if settings exist and SMTP is active)
     if (settings && settings.active_service === 'smtp' && settings.host && settings.port && settings.username && settings.password) {
       console.log(`Using saved SMTP configuration: ${settings.host}:${settings.port}`);
-      const transporter = nodemailer.createTransport({
-        host: settings.host,
-        port: settings.port,
-        secure: settings.port === 465,
-        auth: {
-          user: settings.username,
-          pass: settings.password
-        }
-      });
+      
+      const transportConfig: any = {};
+      if (settings.host.toLowerCase().includes('gmail.com') || settings.host.toLowerCase().includes('googlemail.com')) {
+        console.log('Detected Gmail SMTP Host. Using dedicated service config.');
+        transportConfig.service = 'gmail';
+      } else {
+        transportConfig.host = settings.host;
+        transportConfig.port = settings.port;
+        transportConfig.secure = settings.port === 465;
+      }
+      
+      transportConfig.auth = {
+        user: settings.username,
+        pass: settings.password
+      };
+      
+      const transporter = nodemailer.createTransport(transportConfig);
       const fromAddress = settings.sender_name 
         ? `"${settings.sender_name}" <${settings.sender_email}>`
         : settings.sender_email;
