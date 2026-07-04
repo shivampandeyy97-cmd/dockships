@@ -7,8 +7,8 @@ import path from 'path';
 import { initializeSchema, runQuery, getRow, allRows } from './db';
 import { crawlWebsite } from './services/crawler';
 import { sendOutreachEmail } from './services/email';
-import { fetchSimilarWebDetails } from './services/similarweb';
-import { initializeScheduler } from './services/cron';
+import { sendSlackMessage, sendSlackAlert, getSlackSettings, initSlackClient, handleSlackCommand } from './services/slack';
+import { dockshipsAgent } from './services/agent';
 
 dotenv.config();
 
@@ -33,10 +33,14 @@ app.use(express.json());
 
 // Initialize SQLite Schema on startup
 initializeSchema()
-  .then(() => {
+  .then(async () => {
     console.log('Database Schema initialized successfully.');
-    // Start background cron scheduler
-    initializeScheduler();
+    // Initialize Slack client if token is available
+    const slackSettings = await getSlackSettings();
+    if (slackSettings.bot_token) {
+      initSlackClient(slackSettings.bot_token);
+      console.log('🔔 Slack integration initialized.');
+    }
   })
   .catch((err) => {
     console.error('Failed to initialize database schema:', err);
@@ -47,6 +51,42 @@ function verifyMailgunSignature(apiKey: string, token: string, timestamp: string
   const value = timestamp + token;
   const hash = crypto.createHmac('sha256', apiKey).update(value).digest('hex');
   return hash === signature;
+}
+
+// Mail merge status hierarchy configuration matching YAMM behavior
+const STATUS_LEVELS: Record<string, number> = {
+  'sent': 1,
+  'delivered': 2,
+  'opened': 3,
+  'clicked': 4,
+  'reverted': 5,
+  'bounced': 6
+};
+
+const LEAD_STATUS_LEVELS: Record<string, number> = {
+  'pending': 0,
+  'inactive': 0,
+  'active': 1,
+  'outreach_sent': 2,
+  'delivered': 3,
+  'opened': 4,
+  'clicked': 5,
+  'reverted': 6,
+  'bounced': 7
+};
+
+function shouldUpdateEmailStatus(current: string, next: string): boolean {
+  const currentRank = STATUS_LEVELS[current] || 0;
+  const nextRank = STATUS_LEVELS[next] || 0;
+  return nextRank > currentRank;
+}
+
+function shouldUpdateLeadStatus(current: string, next: string): boolean {
+  let nextLeadStatus = next;
+  if (next === 'sent') nextLeadStatus = 'outreach_sent';
+  const currentRank = LEAD_STATUS_LEVELS[current] || 0;
+  const nextRank = LEAD_STATUS_LEVELS[nextLeadStatus] || 0;
+  return nextRank > currentRank;
 }
 
 // Database diagnostics endpoint
@@ -266,25 +306,23 @@ app.get('/api/leads', async (req, res) => {
       website: string;
       manual_email?: string;
       fetched_emails: string; // JSON string in SQLite
-      domain_active: number;
+      best_email?: string;
+      email_validation_status: string;
+      domain_status: string;
+      ads_txt_status: string;
+      ads_detected: string;
+      contact_form_status: string;
+      linkedin_status: string;
       status: string;
       crawled_at?: string;
       poc_name?: string;
-      similarweb_visits?: number;
-      similarweb_pages_per_visit?: number;
-      similarweb_total_traffic?: number;
-      similarweb_top_geos?: string; // JSON string
-      similarweb_country?: string;
-      similarweb_fetched_at?: string;
       created_at: string;
     }
     const leads = await allRows<LeadRow>('SELECT * FROM dockships_leads ORDER BY created_at DESC');
     
     const parsedLeads = leads.map(lead => ({
       ...lead,
-      domain_active: lead.domain_active === 1,
-      fetched_emails: JSON.parse(lead.fetched_emails || '[]'),
-      similarweb_top_geos: JSON.parse(lead.similarweb_top_geos || '[]')
+      fetched_emails: JSON.parse(lead.fetched_emails || '[]')
     }));
 
     return res.json(parsedLeads);
@@ -311,12 +349,15 @@ app.post('/api/leads', async (req, res) => {
     }
 
     await runQuery(
-      `INSERT INTO dockships_leads (id, website, manual_email, fetched_emails, domain_active, status, poc_name)
-       VALUES (?, ?, ?, '[]', 0, 'pending', ?)`,
+      `INSERT INTO dockships_leads (
+        id, website, manual_email, fetched_emails, domain_status, 
+        ads_txt_status, ads_detected, contact_form_status, linkedin_status, status, poc_name
+       )
+       VALUES (?, ?, ?, '[]', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending', ?)`,
       [leadId, cleanUrl, manualEmail ? manualEmail.trim() : null, pocName ? pocName.trim() : null]
     );
 
-    // Trigger crawler & scraper in background
+    // Trigger crawler & validator in background
     runBackgroundCrawl(leadId, cleanUrl);
 
     const createdLead = {
@@ -325,7 +366,11 @@ app.post('/api/leads', async (req, res) => {
       manual_email: manualEmail ? manualEmail.trim() : null,
       poc_name: pocName ? pocName.trim() : null,
       fetched_emails: [],
-      domain_active: false,
+      domain_status: 'pending',
+      ads_txt_status: 'pending',
+      ads_detected: 'pending',
+      contact_form_status: 'pending',
+      linkedin_status: 'pending',
       status: 'pending',
       created_at: new Date().toISOString()
     };
@@ -338,14 +383,14 @@ app.post('/api/leads', async (req, res) => {
 
 // BULK CREATE leads (from CSV import)
 app.post('/api/leads/bulk', async (req, res) => {
-  const { leads } = req.body; // Array of { website, email, pocName, similarwebVisits, similarwebPagesPerVisit, similarwebTotalTraffic, competitors }
+  const { leads } = req.body; // Array of { website, email, pocName }
   if (!leads || !Array.isArray(leads)) {
     return res.status(400).json({ error: 'Leads array is required.' });
   }
 
   const results = [];
   for (const item of leads) {
-    const { website, email, pocName, similarwebVisits, similarwebPagesPerVisit, similarwebTotalTraffic, competitors } = item;
+    const { website, email, pocName } = item;
     if (!website) continue;
     try {
       const cleanUrl = website.trim().replace(/^https?:\/\//i, '');
@@ -356,60 +401,22 @@ app.post('/api/leads/bulk', async (req, res) => {
       
       if (existing) {
         results.push({ website, status: 'ignored', reason: 'duplicate' });
-        // Process competitors anyway, associating them with the duplicate target website
-        if (competitors && Array.isArray(competitors)) {
-          for (const comp of competitors) {
-            const cleanComp = comp.trim().replace(/^https?:\/\//i, '');
-            if (cleanComp && cleanComp !== cleanUrl) {
-              const originatedId = crypto.randomUUID();
-              await runQuery(
-                `INSERT OR IGNORE INTO dockships_originated_leads (id, website, source_website)
-                 VALUES (?, ?, ?)`,
-                [originatedId, cleanComp, cleanUrl]
-              );
-            }
-          }
-        }
         continue;
       }
 
-      const visitsVal = similarwebVisits !== undefined ? similarwebVisits : null;
-      const pagesVal = similarwebPagesPerVisit !== undefined ? similarwebPagesPerVisit : null;
-      const trafficVal = similarwebTotalTraffic !== undefined ? similarwebTotalTraffic : null;
-      const fetchedAtVal = visitsVal !== null ? new Date().toISOString() : null;
-
       await runQuery(
         `INSERT INTO dockships_leads (
-          id, website, manual_email, fetched_emails, domain_active, status, poc_name,
-          similarweb_visits, similarweb_pages_per_visit, similarweb_total_traffic, similarweb_fetched_at
+          id, website, manual_email, fetched_emails, domain_status, 
+          ads_txt_status, ads_detected, contact_form_status, linkedin_status, status, poc_name
          )
-         VALUES (?, ?, ?, '[]', 0, 'pending', ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, '[]', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending', ?)`,
         [
           leadId,
           cleanUrl,
           email ? email.trim() : null,
-          pocName ? pocName.trim() : null,
-          visitsVal,
-          pagesVal,
-          trafficVal,
-          fetchedAtVal
+          pocName ? pocName.trim() : null
         ]
       );
-
-      // Process competitors
-      if (competitors && Array.isArray(competitors)) {
-        for (const comp of competitors) {
-          const cleanComp = comp.trim().replace(/^https?:\/\//i, '');
-          if (cleanComp && cleanComp !== cleanUrl) {
-            const originatedId = crypto.randomUUID();
-            await runQuery(
-              `INSERT OR IGNORE INTO dockships_originated_leads (id, website, source_website)
-               VALUES (?, ?, ?)`,
-              [originatedId, cleanComp, cleanUrl]
-            );
-          }
-        }
-      }
 
       runBackgroundCrawl(leadId, cleanUrl);
       results.push({ website, status: 'created', id: leadId });
@@ -430,22 +437,34 @@ app.post('/api/leads/:id/crawl', async (req, res) => {
       return res.status(404).json({ error: 'Lead not found.' });
     }
 
-    // 1. Crawl HTML emails
+    // 1. Crawl HTML emails and check validations
     const crawlResult = await crawlWebsite(lead.website);
 
-    // 2. Update database (preserving SimilarWeb data uploaded via sheet)
+    // 2. Update database
     await runQuery(
       `UPDATE dockships_leads 
-       SET domain_active = ?, 
+       SET domain_status = ?,
+           ads_txt_status = ?,
+           ads_detected = ?,
+           contact_form_status = ?,
+           linkedin_status = ?,
            fetched_emails = ?, 
+           best_email = ?,
+           email_validation_status = ?,
            crawled_at = ?, 
            status = ?
        WHERE id = ?`,
       [
-        crawlResult.domainActive ? 1 : 0,
+        crawlResult.domainStatus,
+        crawlResult.adsTxtStatus,
+        crawlResult.adsDetected,
+        crawlResult.contactFormStatus,
+        crawlResult.linkedinStatus,
         JSON.stringify(crawlResult.emails),
+        crawlResult.bestEmail || null,
+        crawlResult.bestEmail ? 'valid' : 'pending',
         new Date().toISOString(),
-        crawlResult.domainActive ? 'active' : 'inactive',
+        crawlResult.domainStatus === 'pass' ? 'active' : 'inactive',
         id
       ]
     );
@@ -457,10 +476,6 @@ app.post('/api/leads/:id/crawl', async (req, res) => {
   }
 });
 
-// TRIGGER SimilarWeb scraper manually (DEPRECATED)
-app.post('/api/leads/:id/similarweb', async (req, res) => {
-  return res.status(400).json({ error: 'SimilarWeb manual scraping is deprecated. SimilarWeb data is now directly uploaded via sheet.' });
-});
 
 // DELETE single lead
 app.delete('/api/leads/:id', async (req, res) => {
@@ -581,16 +596,28 @@ app.get('/api/emails/track/:emailId', async (req, res) => {
   try {
     const email = await getRow<{ status: string, lead_id: string }>('SELECT status, lead_id FROM dockships_emails WHERE id = ?', [emailId]);
     if (email) {
-      if (email.status === 'sent' || email.status === 'delivered') {
+      const lead = await getRow<{ status: string }>('SELECT status FROM dockships_leads WHERE id = ?', [email.lead_id]);
+      
+      if (shouldUpdateEmailStatus(email.status, 'opened')) {
         await runQuery(
           "UPDATE dockships_emails SET status = 'opened', opened_at = datetime('now') WHERE id = ?",
           [emailId]
         );
+      }
+
+      if (lead && shouldUpdateLeadStatus(lead.status, 'opened')) {
         await runQuery(
-          "UPDATE dockships_leads SET status = 'opened' WHERE id = ? AND status IN ('pending', 'active', 'outreach_sent', 'delivered')",
+          "UPDATE dockships_leads SET status = 'opened' WHERE id = ?",
           [email.lead_id]
         );
       }
+
+      // Always log to event timeline when user takes an action
+      const eventId = crypto.randomUUID();
+      await runQuery(
+        `INSERT INTO dockships_email_events (id, email_id, event_type, event_time, metadata) VALUES (?, ?, 'opened', datetime('now'), ?)`,
+        [eventId, emailId, JSON.stringify({ source: 'pixel_tracker', ip: req.ip, userAgent: req.headers['user-agent'] })]
+      ).catch(() => {});
     }
   } catch (err) {
     console.error('Failed to log email open event:', err);
@@ -619,16 +646,28 @@ app.get('/api/emails/click/:emailId', async (req, res) => {
   try {
     const email = await getRow<{ status: string, lead_id: string }>('SELECT status, lead_id FROM dockships_emails WHERE id = ?', [emailId]);
     if (email) {
-      if (email.status === 'sent' || email.status === 'delivered' || email.status === 'opened') {
+      const lead = await getRow<{ status: string }>('SELECT status FROM dockships_leads WHERE id = ?', [email.lead_id]);
+
+      if (shouldUpdateEmailStatus(email.status, 'clicked')) {
         await runQuery(
           "UPDATE dockships_emails SET status = 'clicked', clicked_at = datetime('now') WHERE id = ?",
           [emailId]
         );
+      }
+
+      if (lead && shouldUpdateLeadStatus(lead.status, 'clicked')) {
         await runQuery(
-          "UPDATE dockships_leads SET status = 'clicked' WHERE id = ? AND status IN ('pending', 'active', 'outreach_sent', 'delivered', 'opened')",
+          "UPDATE dockships_leads SET status = 'clicked' WHERE id = ?",
           [email.lead_id]
         );
       }
+
+      // Always log to event timeline when click action is taken
+      const eventId = crypto.randomUUID();
+      await runQuery(
+        `INSERT INTO dockships_email_events (id, email_id, event_type, event_time, metadata) VALUES (?, ?, 'clicked', datetime('now'), ?)`,
+        [eventId, emailId, JSON.stringify({ source: 'click_tracker', ip: req.ip, userAgent: req.headers['user-agent'], targetUrl: url })]
+      ).catch(() => {});
     }
   } catch (err) {
     console.error('Failed to log email click event:', err);
@@ -658,6 +697,17 @@ app.post('/api/emails/webhook', async (req, res) => {
       }
     }
 
+    // Helper to log event to timeline
+    async function logEmailEvent(emailId: string, eventType: string, metadata?: object) {
+      try {
+        const eventId = crypto.randomUUID();
+        await runQuery(
+          `INSERT INTO dockships_email_events (id, email_id, event_type, event_time, metadata) VALUES (?, ?, ?, datetime('now'), ?)`,
+          [eventId, emailId, eventType, metadata ? JSON.stringify(metadata) : null]
+        );
+      } catch (e) { /* ignore */ }
+    }
+
     // 2. Parse Mailgun event tracking data
     const eventData = body['event-data'];
     if (eventData) {
@@ -668,12 +718,13 @@ app.post('/api/emails/webhook', async (req, res) => {
 
       if (recipient) {
         const cleanRecipient = recipient.trim().toLowerCase();
-        const emailRow = await getRow<{ id: string, lead_id: string }>(
-          'SELECT id, lead_id FROM dockships_emails WHERE recipient_email = ? ORDER BY sent_at DESC LIMIT 1',
+        const emailRow = await getRow<{ id: string, lead_id: string, status: string }>(
+          'SELECT id, lead_id, status FROM dockships_emails WHERE recipient_email = ? ORDER BY sent_at DESC LIMIT 1',
           [cleanRecipient]
         );
 
         if (emailRow) {
+          const leadRow = await getRow<{ status: string }>('SELECT status FROM dockships_leads WHERE id = ?', [emailRow.lead_id]);
           let dbStatus = 'sent';
           if (eventType === 'opened') dbStatus = 'opened';
           else if (eventType === 'clicked') dbStatus = 'clicked';
@@ -682,27 +733,58 @@ app.post('/api/emails/webhook', async (req, res) => {
           else if (eventType === 'replied') dbStatus = 'reverted';
 
           const now = new Date().toISOString();
-          let updateQuery = "UPDATE dockships_emails SET status = ?";
-          const params: any[] = [dbStatus];
 
-          if (dbStatus === 'opened') {
-            updateQuery += ", opened_at = ?";
-            params.push(now);
-          } else if (dbStatus === 'clicked') {
-            updateQuery += ", clicked_at = ?";
-            params.push(now);
-          } else if (dbStatus === 'bounced') {
-            updateQuery += ", reverted_at = ?"; // using reverted_at as bounce timestamp for simplicity
-            params.push(now);
-          } else if (dbStatus === 'reverted') {
-            updateQuery += ", reverted_at = ?";
-            params.push(now);
+          // Handle YAMM status hierarchy
+          if (shouldUpdateEmailStatus(emailRow.status, dbStatus)) {
+            let updateQuery = "UPDATE dockships_emails SET status = ?";
+            const params: any[] = [dbStatus];
+
+            if (dbStatus === 'opened') {
+              updateQuery += ", opened_at = ?";
+              params.push(now);
+            } else if (dbStatus === 'clicked') {
+              updateQuery += ", clicked_at = ?";
+              params.push(now);
+            } else if (dbStatus === 'delivered') {
+              updateQuery += ", delivered_at = ?";
+              params.push(now);
+            } else if (dbStatus === 'bounced') {
+              const bounceReason = eventData['delivery-status']?.message || eventData.reason || 'Hard bounce';
+              updateQuery += ", reverted_at = ?, bounce_reason = ?";
+              params.push(now, bounceReason);
+            } else if (dbStatus === 'reverted') {
+              updateQuery += ", reverted_at = ?, reply_count = reply_count + 1";
+              params.push(now);
+            }
+            updateQuery += " WHERE id = ?";
+            params.push(emailRow.id);
+
+            await runQuery(updateQuery, params);
+          } else {
+            // If already reverted/replied, we still increment reply count on new replies
+            if (dbStatus === 'reverted') {
+              await runQuery(
+                "UPDATE dockships_emails SET reply_count = reply_count + 1, reverted_at = ? WHERE id = ?",
+                [now, emailRow.id]
+              );
+            }
           }
-          updateQuery += " WHERE id = ?";
-          params.push(emailRow.id);
 
-          await runQuery(updateQuery, params);
-          await runQuery("UPDATE dockships_leads SET status = ? WHERE id = ?", [dbStatus, emailRow.lead_id]);
+          if (leadRow && shouldUpdateLeadStatus(leadRow.status, dbStatus)) {
+            await runQuery("UPDATE dockships_leads SET status = ? WHERE id = ?", [dbStatus, emailRow.lead_id]);
+          }
+          
+          // Always log to event timeline
+          await logEmailEvent(emailRow.id, dbStatus, {
+            source: 'mailgun_webhook',
+            recipient: cleanRecipient,
+            rawEvent: eventType,
+            ip: eventData.ip,
+            userAgent: eventData['client-info']?.['user-agent'],
+            url: eventData.url,
+            reason: eventData['delivery-status']?.message
+          });
+          
           console.log(`[Webhook] Logged event ${eventType} -> SQLite for lead ${emailRow.lead_id}`);
         }
       }
@@ -714,22 +796,35 @@ app.post('/api/emails/webhook', async (req, res) => {
         const emailMatch = sender.match(/<([^>]+)>/) || [null, sender];
         const cleanSender = (emailMatch[1] || sender).trim().toLowerCase();
 
-        const email = await getRow<{ id: string, lead_id: string }>(
-          `SELECT id, lead_id FROM dockships_emails 
+        const email = await getRow<{ id: string, lead_id: string, status: string }>(
+          `SELECT id, lead_id, status FROM dockships_emails 
            WHERE recipient_email = ? 
            ORDER BY sent_at DESC LIMIT 1`,
           [cleanSender]
         );
 
         if (email) {
-          await runQuery(
-            "UPDATE dockships_emails SET status = 'reverted', reverted_at = datetime('now') WHERE id = ?",
-            [email.id]
-          );
-          await runQuery(
-            "UPDATE dockships_leads SET status = 'reverted' WHERE id = ?",
-            [email.lead_id]
-          );
+          const lead = await getRow<{ status: string }>('SELECT status FROM dockships_leads WHERE id = ?', [email.lead_id]);
+          
+          if (shouldUpdateEmailStatus(email.status, 'reverted')) {
+            await runQuery(
+              "UPDATE dockships_emails SET status = 'reverted', reverted_at = datetime('now'), reply_count = reply_count + 1 WHERE id = ?",
+              [email.id]
+            );
+          } else {
+            await runQuery(
+              "UPDATE dockships_emails SET reply_count = reply_count + 1, reverted_at = datetime('now') WHERE id = ?",
+              [email.id]
+            );
+          }
+
+          if (lead && shouldUpdateLeadStatus(lead.status, 'reverted')) {
+            await runQuery(
+              "UPDATE dockships_leads SET status = 'reverted' WHERE id = ?",
+              [email.lead_id]
+            );
+          }
+          await logEmailEvent(email.id, 'reverted', { source: 'inbound_reply', sender: cleanSender });
           console.log(`[Webhook] Reply webhook success: marked lead ${email.lead_id} as reverted/replied.`);
         }
       }
@@ -786,72 +881,43 @@ app.patch('/api/emails/:emailId/status', async (req, res) => {
   }
 });
 
-// CRON API - GET all registered cron jobs
-app.get('/api/cron', async (req, res) => {
-  try {
-    const jobs = await allRows('SELECT * FROM dockships_cron_jobs ORDER BY created_at ASC');
-    return res.json(jobs);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// CRON API - POST toggle active state of cron job
-app.post('/api/cron/:id/toggle', async (req, res) => {
-  const { id } = req.params;
-  const { active } = req.body; // boolean
-  try {
-    const { toggleCronJob } = require('./services/cron');
-    const success = await toggleCronJob(id, active);
-    if (success) {
-      return res.json({ success: true });
-    }
-    return res.status(500).json({ error: 'Failed to update cron job schedule.' });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// CRON API - POST trigger cron job execution immediately
-app.post('/api/cron/:id/run', async (req, res) => {
-  const { id } = req.params;
-  try {
-    const job = await getRow<{ job_type: string }>('SELECT job_type FROM dockships_cron_jobs WHERE id = ?', [id]);
-    if (!job) {
-      return res.status(404).json({ error: 'Cron job not found.' });
-    }
-    const { executeJobLogic } = require('./services/cron');
-    await executeJobLogic(id, job.job_type);
-    return res.json({ success: true, message: 'Cron task triggered in background successfully.' });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
 
 // Background crawl handler
 async function runBackgroundCrawl(leadId: string, websiteUrl: string) {
   console.log(`[Background CRAWL] starting for ${leadId} (${websiteUrl})`);
   try {
-    // 1. Crawl HTML emails
+    // 1. Crawl HTML emails and validations
     const crawlResult = await crawlWebsite(websiteUrl);
 
-    // 2. Update database
+    // 2. Update database with validations
     await runQuery(
       `UPDATE dockships_leads 
-       SET domain_active = ?, 
+       SET domain_status = ?,
+           ads_txt_status = ?,
+           ads_detected = ?,
+           contact_form_status = ?,
+           linkedin_status = ?,
            fetched_emails = ?, 
+           best_email = ?,
+           email_validation_status = ?,
            crawled_at = ?, 
            status = ?
        WHERE id = ?`,
       [
-        crawlResult.domainActive ? 1 : 0,
+        crawlResult.domainStatus,
+        crawlResult.adsTxtStatus,
+        crawlResult.adsDetected,
+        crawlResult.contactFormStatus,
+        crawlResult.linkedinStatus,
         JSON.stringify(crawlResult.emails),
+        crawlResult.bestEmail || null,
+        crawlResult.bestEmail ? 'valid' : 'pending',
         new Date().toISOString(),
-        crawlResult.domainActive ? 'active' : 'inactive',
+        crawlResult.domainStatus === 'pass' ? 'active' : 'inactive',
         leadId
       ]
     );
-    console.log(`[Background CRAWL] completed for ${leadId}. Status: ${crawlResult.domainActive ? 'Online' : 'Offline'}`);
+    console.log(`[Background CRAWL] completed for ${leadId}. Domain: ${crawlResult.domainStatus}, Ads.txt: ${crawlResult.adsTxtStatus}`);
   } catch (err: any) {
     console.error(`[Background CRAWL] failed for ${leadId}:`, err.message);
   }
@@ -1085,66 +1151,6 @@ app.post('/api/leads/bulk-email', async (req, res) => {
   }
 });
 
-// GET all originated leads (competitors parsed from CSV)
-app.get('/api/originated-leads', async (req, res) => {
-  try {
-    const leads = await allRows('SELECT * FROM dockships_originated_leads ORDER BY created_at DESC');
-    return res.json(leads);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to fetch originated leads.' });
-  }
-});
-
-// DELETE originated lead
-app.delete('/api/originated-leads/:id', async (req, res) => {
-  const { id } = req.params;
-  try {
-    await runQuery('DELETE FROM dockships_originated_leads WHERE id = ?', [id]);
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to delete originated lead.' });
-  }
-});
-
-// CONVERT originated lead to main target lead
-app.post('/api/originated-leads/:id/convert', async (req, res) => {
-  const { id } = req.params;
-  try {
-    // 1. Fetch originated lead details
-    const origLead = await getRow<{ website: string }>('SELECT website FROM dockships_originated_leads WHERE id = ?', [id]);
-    if (!origLead) {
-      return res.status(404).json({ error: 'Originated lead not found.' });
-    }
-
-    const cleanUrl = origLead.website.trim().replace(/^https?:\/\//i, '');
-    const leadId = crypto.randomUUID();
-
-    // 2. Check duplicate in targets
-    const existing = await getRow('SELECT id FROM dockships_leads WHERE website = ?', [cleanUrl]);
-    if (existing) {
-      // If it already exists, just delete from originated leads and return 200
-      await runQuery('DELETE FROM dockships_originated_leads WHERE id = ?', [id]);
-      return res.json({ success: true, message: 'Lead already existed as target; removed from originated.' });
-    }
-
-    // 3. Insert into main leads table
-    await runQuery(
-      `INSERT INTO dockships_leads (id, website, manual_email, fetched_emails, domain_active, status)
-       VALUES (?, ?, null, '[]', 0, 'pending')`,
-      [leadId, cleanUrl]
-    );
-
-    // 4. Delete from originated leads
-    await runQuery('DELETE FROM dockships_originated_leads WHERE id = ?', [id]);
-
-    // 5. Trigger crawl in background
-    runBackgroundCrawl(leadId, cleanUrl);
-
-    return res.json({ success: true, message: 'Successfully converted originated lead to active target.' });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to convert originated lead.' });
-  }
-});
 
 // Helper for deterministic probability checks
 function getStringHash(str: string): number {
@@ -1235,6 +1241,190 @@ async function automateEmailStatusShifting() {
   }
 }
 
+// ===== NEW ENDPOINTS =====
+
+// GET email aggregate stats
+app.get('/api/emails/stats', async (req, res) => {
+  try {
+    const emails = await allRows<{ status: string; sent_at: string }>('SELECT status, sent_at FROM dockships_emails');
+    const total = emails.length;
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const opened = emails.filter(e => ['opened', 'clicked', 'reverted'].includes(e.status)).length;
+    const clicked = emails.filter(e => ['clicked', 'reverted'].includes(e.status)).length;
+    const bounced = emails.filter(e => e.status === 'bounced').length;
+    const delivered = emails.filter(e => ['delivered', 'opened', 'clicked', 'reverted'].includes(e.status)).length;
+    const replied = emails.filter(e => e.status === 'reverted').length;
+    const recentlySent = emails.filter(e => e.sent_at > twentyFourHoursAgo).length;
+
+    return res.json({
+      total,
+      delivered,
+      opened,
+      clicked,
+      bounced,
+      replied,
+      recentlySent,
+      openRate: total > 0 ? (opened / total) * 100 : 0,
+      clickRate: total > 0 ? (clicked / total) * 100 : 0,
+      bounceRate: total > 0 ? (bounced / total) * 100 : 0,
+      deliveryRate: total > 0 ? (delivered / total) * 100 : 0,
+      replyRate: total > 0 ? (replied / total) * 100 : 0,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to compute email stats.' });
+  }
+});
+
+// GET event timeline for a single email
+app.get('/api/emails/:emailId/events', async (req, res) => {
+  const { emailId } = req.params;
+  try {
+    const events = await allRows(
+      'SELECT * FROM dockships_email_events WHERE email_id = ? ORDER BY event_time ASC',
+      [emailId]
+    );
+    return res.json(events);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch email events.' });
+  }
+});
+
+// GET Slack settings
+app.get('/api/settings/slack', async (req, res) => {
+  try {
+    const row = await getRow<any>('SELECT * FROM dockships_slack_settings LIMIT 1');
+    return res.json({
+      bot_token: row?.bot_token ? '••••••••••••••••' : '',
+      channel: row?.channel || process.env.SLACK_CHANNEL || '#dockships-alerts',
+      signing_secret: row?.signing_secret ? '••••••••' : '',
+      webhook_url: row?.webhook_url || process.env.SLACK_WEBHOOK_URL || '',
+      configured: !!(row?.bot_token || process.env.SLACK_BOT_TOKEN || row?.webhook_url || process.env.SLACK_WEBHOOK_URL),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch Slack settings.' });
+  }
+});
+
+// SAVE Slack settings
+app.post('/api/settings/slack', async (req, res) => {
+  const { botToken, channel, signingSecret, webhookUrl } = req.body;
+
+  try {
+    const existing = await getRow<any>('SELECT * FROM dockships_slack_settings LIMIT 1');
+
+    // Preserve existing secrets if masked values are sent
+    let finalToken = botToken;
+    if (!finalToken || finalToken === '••••••••••••••••') {
+      finalToken = existing?.bot_token || process.env.SLACK_BOT_TOKEN || null;
+    }
+    let finalSigningSecret = signingSecret;
+    if (!finalSigningSecret || finalSigningSecret === '••••••••') {
+      finalSigningSecret = existing?.signing_secret || process.env.SLACK_SIGNING_SECRET || null;
+    }
+
+    await runQuery(
+      `INSERT INTO dockships_slack_settings (id, bot_token, channel, signing_secret, webhook_url, updated_at)
+       VALUES (1, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(id) DO UPDATE SET
+         bot_token = excluded.bot_token,
+         channel = excluded.channel,
+         signing_secret = excluded.signing_secret,
+         webhook_url = excluded.webhook_url,
+         updated_at = excluded.updated_at`,
+      [finalToken || null, channel || '#dockships-alerts', finalSigningSecret || null, webhookUrl || null]
+    );
+
+    // Re-init Slack client with new token
+    if (finalToken) {
+      initSlackClient(finalToken);
+    }
+
+    return res.json({ success: true, message: 'Slack settings saved successfully.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to save Slack settings.' });
+  }
+});
+
+// POST test Slack connection
+app.post('/api/slack/test', async (req, res) => {
+  try {
+    const result = await sendSlackMessage(
+      '🚀 *Dockships Test Message* — Slack integration is working correctly! Your daily reports and alerts will appear here.',
+      undefined
+    );
+    if (result.success) {
+      return res.json({ success: true, message: 'Test message sent to Slack successfully!' });
+    }
+    return res.status(400).json({ success: false, error: result.error || 'Failed to send test message.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Slack test failed.' });
+  }
+});
+
+// POST Slack Events API / slash command webhook
+app.post('/api/slack/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+
+    // Slack URL verification challenge
+    if (body.type === 'url_verification') {
+      return res.json({ challenge: body.challenge });
+    }
+
+    // Handle interactive component actions (button clicks)
+    if (body.payload) {
+      const payload = typeof body.payload === 'string' ? JSON.parse(body.payload) : body.payload;
+      if (payload.type === 'block_actions') {
+        const action = payload.actions?.[0];
+        if (action?.value) {
+          const responseText = await handleSlackCommand(action.value);
+          await sendSlackMessage(responseText);
+        }
+      }
+      return res.status(200).send('');
+    }
+
+    // Handle slash commands
+    const command = body.text || body.command;
+    if (command) {
+      const responseText = await handleSlackCommand(command, body.user_id);
+      return res.json({
+        response_type: 'in_channel',
+        text: responseText
+      });
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (err: any) {
+    console.error('[Slack Webhook] Error:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST trigger agent manually
+app.post('/api/agent/run', async (req, res) => {
+  try {
+    // Run in background
+    dockshipsAgent.runDailyCheck().catch(err => console.error('Agent run error:', err));
+    return res.json({ success: true, message: 'Agent check triggered! Slack report will be posted shortly.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Agent trigger failed.' });
+  }
+});
+
+// GET agent stats snapshot
+app.get('/api/agent/stats', async (req, res) => {
+  try {
+    const stats = await dockshipsAgent.gatherStats();
+    return res.json(stats);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to gather agent stats.' });
+  }
+});
+
+// ===== END NEW ENDPOINTS =====
+
 // Serve frontend static assets in production
 const frontendBuildPath = path.resolve(__dirname, '../../frontend/dist');
 app.use(express.static(frontendBuildPath));
@@ -1250,6 +1440,7 @@ app.get('*', (req, res, next) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Dockships API Server (SQLite Edition) running on port ${PORT}`);
-  // Start the background email status shifting worker
-  setInterval(automateEmailStatusShifting, 5000);
+  // Auto-simulate is disabled by default — real tracking via Mailgun webhooks and pixel tracker is active
+  // Uncomment the line below only for demo/testing purposes:
+  // setInterval(automateEmailStatusShifting, 5000);
 });

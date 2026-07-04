@@ -12,16 +12,16 @@ interface Lead {
   website: string;
   manual_email?: string;
   fetched_emails: string[];
-  domain_active: boolean;
+  best_email?: string;
+  email_validation_status?: string;
+  domain_status?: string;
+  ads_txt_status?: string;
+  ads_detected?: string;
+  contact_form_status?: string;
+  linkedin_status?: string;
   status: string;
   crawled_at?: string;
   poc_name?: string;
-  similarweb_visits?: number;
-  similarweb_pages_per_visit?: number;
-  similarweb_total_traffic?: number;
-  similarweb_top_geos?: Array<{ name: string; share: number }>;
-  similarweb_country?: string;
-  similarweb_fetched_at?: string;
   created_at: string;
 }
 
@@ -32,20 +32,45 @@ interface EmailLog {
   subject: string;
   body: string;
   status: string;
+  email_provider?: string;
+  bounce_reason?: string;
+  reply_count?: number;
   sent_at: string;
+  delivered_at?: string;
   opened_at?: string;
   clicked_at?: string;
   reverted_at?: string;
 }
 
-interface CronJob {
+interface EmailEvent {
   id: string;
-  name: string;
-  expression: string;
-  job_type: string;
-  active: number;
-  last_run?: string;
-  created_at: string;
+  email_id: string;
+  event_type: string;
+  event_time: string;
+  metadata?: string;
+}
+
+interface EmailStats {
+  total: number;
+  delivered: number;
+  opened: number;
+  clicked: number;
+  bounced: number;
+  replied: number;
+  recentlySent: number;
+  openRate: number;
+  clickRate: number;
+  bounceRate: number;
+  deliveryRate: number;
+  replyRate: number;
+}
+
+interface SlackSettings {
+  bot_token: string;
+  channel: string;
+  signing_secret: string;
+  webhook_url: string;
+  configured: boolean;
 }
 
 interface Draft {
@@ -69,19 +94,11 @@ function parseCSV(text: string) {
   const websiteIndex = headers.findIndex(h => h.includes('website') || h.includes('domain') || h.includes('url'));
   const emailIndex = headers.findIndex(h => h.includes('email') || h.includes('mail') || h.includes('contact'));
   const pocIndex = headers.findIndex(h => h.includes('poc') || h.includes('name') || h.includes('person'));
-  const visitsIndex = headers.findIndex(h => h.includes('visit'));
-  const pagesIndex = headers.findIndex(h => h.includes('page'));
-  const volumeIndex = headers.findIndex(h => h.includes('volume') || h.includes('traffic'));
-  const competitorsIndex = headers.findIndex(h => h.includes('competitor') || h.includes('similar website') || h.includes('similar_website') || h.includes('similarwebsites'));
 
   interface ParsedLead {
     website: string;
     email?: string;
     pocName?: string;
-    similarwebVisits?: number;
-    similarwebPagesPerVisit?: number;
-    similarwebTotalTraffic?: number;
-    competitors?: string[];
   }
 
   const parsedLeads: ParsedLead[] = [];
@@ -109,29 +126,12 @@ function parseCSV(text: string) {
     const website = websiteIndex !== -1 ? tokens[websiteIndex] : tokens[0];
     const email = emailIndex !== -1 ? tokens[emailIndex] : tokens[1];
     const pocName = pocIndex !== -1 ? tokens[pocIndex] : tokens[2];
-    const visits = visitsIndex !== -1 ? tokens[visitsIndex] : undefined;
-    const pages = pagesIndex !== -1 ? tokens[pagesIndex] : undefined;
-    const volume = volumeIndex !== -1 ? tokens[volumeIndex] : undefined;
-    const competitors = competitorsIndex !== -1 ? tokens[competitorsIndex] : undefined;
 
     if (website) {
-      let compsList: string[] = [];
-      if (competitors) {
-        compsList = competitors
-          .split(/[;|]/)
-          .flatMap(c => c.split(','))
-          .map(c => c.trim().replace(/^https?:\/\//i, '').replace(/^["']|["']$/g, '').trim())
-          .filter(c => c.length > 0);
-      }
-
       parsedLeads.push({
         website: website.trim(),
         email: email ? email.trim() : undefined,
-        pocName: pocName ? pocName.trim() : undefined,
-        similarwebVisits: visits ? parseInt(visits.replace(/,/g, ''), 10) : undefined,
-        similarwebPagesPerVisit: pages ? parseFloat(pages) : undefined,
-        similarwebTotalTraffic: volume ? parseFloat(volume.replace(/,/g, '') || '0') : undefined,
-        competitors: compsList.length > 0 ? compsList : undefined
+        pocName: pocName ? pocName.trim() : undefined
       });
     }
   }
@@ -139,7 +139,7 @@ function parseCSV(text: string) {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'cron' | 'templates' | 'originated'>('leads');
+  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'templates' | 'agent'>('leads');
   
   // Theme state
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -168,9 +168,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [emailLogs, setEmailLogs] = useState<EmailLog[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
-  // Cron states
-  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
-  const [loadingCron, setLoadingCron] = useState(false);
 
   // Settings states
   const [activeService, setActiveService] = useState<'smtp' | 'mailgun'>('smtp');
@@ -211,9 +208,32 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [editingPocLeadId, setEditingPocLeadId] = useState<string | null>(null);
   const [pocNameEditVal, setPocNameEditVal] = useState('');
 
-  // Originated leads states
-  const [originatedLeads, setOriginatedLeads] = useState<any[]>([]);
-  const [loadingOriginated, setLoadingOriginated] = useState(false);
+  // Simplified flow filters
+  const [domainFilter, setDomainFilter] = useState<'all' | 'pass' | 'failed'>('all');
+  const [adsTxtFilter, setAdsTxtFilter] = useState<'all' | 'present' | 'not present'>('all');
+  const [adsFilter, setAdsFilter] = useState<'all' | 'yes' | 'no'>('all');
+  const [contactFilter, setContactFilter] = useState<'all' | 'email found' | 'contact form available' | 'none'>('all');
+  const [linkedinFilter, setLinkedinFilter] = useState<'all' | 'working' | 'none'>('all');
+
+  // Email stats states
+  const [emailStats, setEmailStats] = useState<EmailStats | null>(null);
+  const [logsFilter, setLogsFilter] = useState<'all' | 'opened' | 'clicked' | 'bounced' | 'reverted' | 'delivered' | 'sent'>('all');
+  const [expandedEmailId, setExpandedEmailId] = useState<string | null>(null);
+  const [emailEvents, setEmailEvents] = useState<Record<string, EmailEvent[]>>({});
+  const [loadingEvents, setLoadingEvents] = useState<Record<string, boolean>>({});
+
+  // Slack / Agent states
+  const [slackSettings, setSlackSettings] = useState<SlackSettings | null>(null);
+  const [slackBotToken, setSlackBotToken] = useState('');
+  const [slackChannel, setSlackChannel] = useState('#dockships-alerts');
+  const [slackSigningSecret, setSlackSigningSecret] = useState('');
+  const [slackWebhookUrl, setSlackWebhookUrl] = useState('');
+  const [savingSlack, setSavingSlack] = useState(false);
+  const [slackStatus, setSlackStatus] = useState({ success: '', error: '' });
+  const [testingSlack, setTestingSlack] = useState(false);
+  const [agentStats, setAgentStats] = useState<any | null>(null);
+  const [agentRunning, setAgentRunning] = useState(false);
+  const [agentMessage, setAgentMessage] = useState('');
 
   // Apply Theme Toggle Class
   useEffect(() => {
@@ -225,55 +245,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     localStorage.setItem('dockships_theme', theme);
   }, [theme]);
 
-  // Fetch functions
-  const fetchOriginatedLeads = async () => {
-    setLoadingOriginated(true);
-    try {
-      const response = await fetch(`${API_URL}/api/originated-leads`);
-      if (response.ok) {
-        const data = await response.json();
-        setOriginatedLeads(data);
-      }
-    } catch (e) {
-      console.error('Error loading originated leads:', e);
-    } finally {
-      setLoadingOriginated(false);
-    }
-  };
-
-  const handleConvertOriginated = async (id: string) => {
-    try {
-      const response = await fetch(`${API_URL}/api/originated-leads/${id}/convert`, {
-        method: 'POST'
-      });
-      const data = await response.json();
-      if (response.ok) {
-        alert(data.message || 'Successfully converted originated lead!');
-        fetchOriginatedLeads();
-        fetchLeads();
-      } else {
-        alert(data.error || 'Failed to convert originated lead.');
-      }
-    } catch (e) {
-      console.error('Error converting originated lead:', e);
-    }
-  };
-
-  const handleDeleteOriginated = async (id: string) => {
-    if (!confirm('Are you sure you want to dismiss this originated lead?')) return;
-    try {
-      const response = await fetch(`${API_URL}/api/originated-leads/${id}`, {
-        method: 'DELETE'
-      });
-      if (response.ok) {
-        fetchOriginatedLeads();
-      } else {
-        alert('Failed to delete originated lead.');
-      }
-    } catch (e) {
-      console.error('Error deleting originated lead:', e);
-    }
-  };
 
   const fetchLeads = async () => {
     try {
@@ -304,18 +275,64 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
-  const fetchCronJobs = async () => {
-    setLoadingCron(true);
+  const fetchEmailStats = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/cron`);
+      const response = await fetch(`${API_URL}/api/emails/stats`);
       if (response.ok) {
         const data = await response.json();
-        setCronJobs(data);
+        setEmailStats(data);
       }
     } catch (e) {
-      console.error('Error loading cron jobs:', e);
+      console.error('Error loading email stats:', e);
+    }
+  };
+
+  const fetchEmailEvents = async (emailId: string) => {
+    if (emailEvents[emailId]) {
+      // Toggle off if already loaded
+      setExpandedEmailId(prev => prev === emailId ? null : emailId);
+      return;
+    }
+    setLoadingEvents(prev => ({ ...prev, [emailId]: true }));
+    setExpandedEmailId(emailId);
+    try {
+      const response = await fetch(`${API_URL}/api/emails/${emailId}/events`);
+      if (response.ok) {
+        const data = await response.json();
+        setEmailEvents(prev => ({ ...prev, [emailId]: data }));
+      }
+    } catch (e) {
+      console.error('Error loading email events:', e);
     } finally {
-      setLoadingCron(false);
+      setLoadingEvents(prev => ({ ...prev, [emailId]: false }));
+    }
+  };
+
+  const fetchSlackSettings = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/settings/slack`);
+      if (response.ok) {
+        const data = await response.json();
+        setSlackSettings(data);
+        setSlackBotToken(data.bot_token || '');
+        setSlackChannel(data.channel || '#dockships-alerts');
+        setSlackSigningSecret(data.signing_secret || '');
+        setSlackWebhookUrl(data.webhook_url || '');
+      }
+    } catch (e) {
+      console.error('Error loading Slack settings:', e);
+    }
+  };
+
+  const fetchAgentStats = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/agent/stats`);
+      if (response.ok) {
+        const data = await response.json();
+        setAgentStats(data);
+      }
+    } catch (e) {
+      console.error('Error loading agent stats:', e);
     }
   };
 
@@ -503,8 +520,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     fetchLeads();
     fetchSmtpSettings();
     fetchDrafts();
+    fetchEmailStats();
     
-    const interval = setInterval(fetchLeads, 5000);
+    const interval = setInterval(() => {
+      fetchLeads();
+      fetchEmailStats();
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -513,21 +534,85 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
     if (activeTab === 'logs') {
       fetchLogs();
-      interval = setInterval(fetchLogs, 5000);
-    } else if (activeTab === 'cron') {
-      fetchCronJobs();
-      interval = setInterval(fetchCronJobs, 5000);
+      fetchEmailStats();
+      interval = setInterval(() => { fetchLogs(); fetchEmailStats(); }, 5000);
     } else if (activeTab === 'templates') {
       fetchDrafts();
-    } else if (activeTab === 'originated') {
-      fetchOriginatedLeads();
-      interval = setInterval(fetchOriginatedLeads, 5000);
+    } else if (activeTab === 'agent') {
+      fetchSlackSettings();
+      fetchAgentStats();
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
   }, [activeTab]);
+
+  const handleSaveSlackSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingSlack(true);
+    setSlackStatus({ success: '', error: '' });
+    try {
+      const response = await fetch(`${API_URL}/api/settings/slack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          botToken: slackBotToken,
+          channel: slackChannel,
+          signingSecret: slackSigningSecret,
+          webhookUrl: slackWebhookUrl,
+        })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setSlackStatus({ success: 'Slack settings saved!', error: '' });
+        fetchSlackSettings();
+      } else {
+        setSlackStatus({ success: '', error: data.error || 'Failed to save.' });
+      }
+    } catch (err: any) {
+      setSlackStatus({ success: '', error: err.message });
+    } finally {
+      setSavingSlack(false);
+    }
+  };
+
+  const handleTestSlack = async () => {
+    setTestingSlack(true);
+    setSlackStatus({ success: '', error: '' });
+    try {
+      const response = await fetch(`${API_URL}/api/slack/test`, { method: 'POST' });
+      const data = await response.json();
+      if (response.ok) {
+        setSlackStatus({ success: data.message || 'Test message sent!', error: '' });
+      } else {
+        setSlackStatus({ success: '', error: data.error || 'Test failed.' });
+      }
+    } catch (err: any) {
+      setSlackStatus({ success: '', error: err.message });
+    } finally {
+      setTestingSlack(false);
+    }
+  };
+
+  const handleRunAgent = async () => {
+    setAgentRunning(true);
+    setAgentMessage('');
+    try {
+      const response = await fetch(`${API_URL}/api/agent/run`, { method: 'POST' });
+      const data = await response.json();
+      if (response.ok) {
+        setAgentMessage(data.message || 'Agent triggered!');
+        setTimeout(() => fetchAgentStats(), 3000);
+      } else {
+        setAgentMessage(data.error || 'Agent trigger failed.');
+      }
+    } catch (err: any) {
+      setAgentMessage(err.message);
+    } finally {
+      setAgentRunning(false);
+    }
+  };
 
   const handleAddLead = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -757,33 +842,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
-  const handleToggleCron = async (id: string, active: boolean) => {
-    try {
-      const response = await fetch(`${API_URL}/api/cron/${id}/toggle`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ active })
-      });
-      if (response.ok) {
-        fetchCronJobs();
-      }
-    } catch (e) {
-      console.error('Error toggling cron job:', e);
-    }
-  };
-
-  const handleRunCron = async (id: string) => {
-    try {
-      const response = await fetch(`${API_URL}/api/cron/${id}/run`, { method: 'POST' });
-      if (response.ok) {
-        alert('Cron job triggered successfully! Check server logs for output.');
-        fetchCronJobs();
-      }
-    } catch (e) {
-      console.error('Error executing cron:', e);
-    }
-  };
-
   const handleSaveSmtpSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingSettings(true);
@@ -824,7 +882,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
   // Stats
   const totalLeads = leads.length;
-  const activeDomains = leads.filter(l => l.domain_active).length;
+  const activeDomains = leads.filter(l => l.domain_status === 'pass').length;
   const emailsCollected = leads.reduce((acc, lead) => {
     const list = new Set([
       ...(lead.manual_email ? [lead.manual_email] : []),
@@ -854,13 +912,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             🎯 Targets Dashboard
           </button>
           <button 
-            className={`btn ${activeTab === 'originated' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setActiveTab('originated')}
-            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
-          >
-            🌱 Originated Leads
-          </button>
-          <button 
             className={`btn ${activeTab === 'templates' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('templates')}
             style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
@@ -875,18 +926,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             📋 Outreach Logs
           </button>
           <button 
-            className={`btn ${activeTab === 'cron' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setActiveTab('cron')}
-            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
-          >
-            ⏰ Task Scheduler
-          </button>
-          <button 
             className={`btn ${activeTab === 'settings' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('settings')}
             style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
           >
             ⚙️ SMTP Settings
+          </button>
+          <button 
+            className={`btn ${activeTab === 'agent' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setActiveTab('agent')}
+            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem', position: 'relative' }}
+          >
+            🤖 Agent
+            {slackSettings?.configured && (
+              <span style={{ position: 'absolute', top: '-4px', right: '-4px', width: '8px', height: '8px', borderRadius: '50%', background: '#22c55e', border: '2px solid var(--bg-surface)' }} />
+            )}
           </button>
         </nav>
 
@@ -1020,483 +1074,706 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             <div className="glass-panel leads-list">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
                 <h2 className="card-title" style={{ margin: 0 }}>Active Targets Tracker</h2>
-              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                {selectedCount > 0 && (
-                  <>
-                    <button 
-                      className="btn btn-primary animate-fade" 
-                      onClick={() => setShowBulkModal(true)}
-                      style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}
-                    >
-                      ✉️ Bulk Outreach ({selectedCount})
-                    </button>
-                    <button 
-                      className="btn btn-danger animate-fade" 
-                      onClick={handleBulkDelete}
-                      style={{ padding: '0.45rem 1rem', fontSize: '0.85rem', background: '#ef4444', borderColor: '#ef4444' }}
-                    >
-                      🗑️ Delete Selected ({selectedCount})
-                    </button>
-                  </>
-                )}
-                <button className="btn btn-secondary" onClick={fetchLeads} disabled={loadingLeads} style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}>
-                  Refresh
-                </button>
+                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                  {selectedCount > 0 && (
+                    <>
+                      <button 
+                        className="btn btn-primary animate-fade" 
+                        onClick={() => setShowBulkModal(true)}
+                        style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}
+                      >
+                        ✉️ Bulk Outreach ({selectedCount})
+                      </button>
+                      <button 
+                        className="btn btn-danger animate-fade" 
+                        onClick={handleBulkDelete}
+                        style={{ padding: '0.45rem 1rem', fontSize: '0.85rem', background: '#ef4444', borderColor: '#ef4444' }}
+                      >
+                        🗑️ Delete Selected ({selectedCount})
+                      </button>
+                    </>
+                  )}
+                  <button className="btn btn-secondary" onClick={fetchLeads} disabled={loadingLeads} style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}>
+                    Refresh
+                  </button>
+                </div>
               </div>
-            </div>
 
-            {loadingLeads && leads.length === 0 ? (
-              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
-                Loading database...
-              </div>
-            ) : leads.length === 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
-                <span style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>🌐</span>
-                <p>No outreach targets registered yet.</p>
-                <p style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>Enter a website URL or import a CSV on the left to start.</p>
-              </div>
-            ) : (
-              <div className="table-wrapper">
-                <table>
-                  <thead>
-                    <tr>
-                      <th style={{ width: '40px' }}>
-                        <input 
-                          type="checkbox"
-                          checked={leads.length > 0 && leads.every(l => selectedLeadIds[l.id])}
-                          onChange={(e) => {
-                            const checked = e.target.checked;
-                            const newSelected: Record<string, boolean> = {};
-                            if (checked) {
-                              leads.forEach(l => { newSelected[l.id] = true; });
-                            }
-                            setSelectedLeadIds(newSelected);
-                          }}
-                        />
-                      </th>
-                      <th>Domain</th>
-                      <th>POC Name</th>
-                      <th>Status</th>
-                      <th>Monthly Visits</th>
-                      <th>Total Volume</th>
-                      <th>Top 5 GEOS</th>
-                      <th>Contact Details</th>
-                      <th>Flow Status</th>
-                      <th style={{ textAlign: 'right' }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leads.map((lead) => {
-                      const emailsList = Array.from(new Set([
-                        ...(lead.manual_email ? [lead.manual_email] : []),
-                        ...(lead.fetched_emails || [])
-                      ]));
-                      const isCrawling = crawlingIds[lead.id];
+              {/* TOP FILTERS BAR */}
+              {leads.length > 0 && (
+                <div style={{
+                  display: 'flex',
+                  gap: '1rem',
+                  flexWrap: 'wrap',
+                  padding: '1rem',
+                  background: 'rgba(255, 255, 255, 0.02)',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(255, 255, 255, 0.05)',
+                  marginBottom: '1.5rem',
+                  alignItems: 'center'
+                }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-bright)' }}>Filters:</span>
+                  
+                  {/* Domain Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Domain Status</label>
+                    <select 
+                      value={domainFilter} 
+                      onChange={(e: any) => setDomainFilter(e.target.value)}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '130px', height: '30px' }}
+                    >
+                      <option value="all">All Domains</option>
+                      <option value="pass">Pass</option>
+                      <option value="failed">Failed</option>
+                    </select>
+                  </div>
 
-                      return (
-                        <tr key={lead.id} className={selectedLeadIds[lead.id] ? 'selected-row' : ''}>
-                          <td>
+                  {/* ads.txt Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ads.txt Status</label>
+                    <select 
+                      value={adsTxtFilter} 
+                      onChange={(e: any) => setAdsTxtFilter(e.target.value)}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '140px', height: '30px' }}
+                    >
+                      <option value="all">All ads.txt</option>
+                      <option value="present">Present</option>
+                      <option value="not present">Not Present</option>
+                    </select>
+                  </div>
+
+                  {/* Ads Detected Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Ads Appearing</label>
+                    <select 
+                      value={adsFilter} 
+                      onChange={(e: any) => setAdsFilter(e.target.value)}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '120px', height: '30px' }}
+                    >
+                      <option value="all">All Ads</option>
+                      <option value="yes">Yes</option>
+                      <option value="no">No</option>
+                    </select>
+                  </div>
+
+                  {/* Contact Info Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Contact Info</label>
+                    <select 
+                      value={contactFilter} 
+                      onChange={(e: any) => setContactFilter(e.target.value)}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '180px', height: '30px' }}
+                    >
+                      <option value="all">All Contact Info</option>
+                      <option value="email found">Email Found</option>
+                      <option value="contact form available">Contact Form Available</option>
+                      <option value="none">None</option>
+                    </select>
+                  </div>
+
+                  {/* LinkedIn Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>LinkedIn</label>
+                    <select 
+                      value={linkedinFilter} 
+                      onChange={(e: any) => setLinkedinFilter(e.target.value)}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '130px', height: '30px' }}
+                    >
+                      <option value="all">All LinkedIn</option>
+                      <option value="working">Working Link</option>
+                      <option value="none">None</option>
+                    </select>
+                  </div>
+
+                  {/* Clear Button */}
+                  {(domainFilter !== 'all' || adsTxtFilter !== 'all' || adsFilter !== 'all' || contactFilter !== 'all' || linkedinFilter !== 'all') && (
+                    <button 
+                      onClick={() => {
+                        setDomainFilter('all');
+                        setAdsTxtFilter('all');
+                        setAdsFilter('all');
+                        setContactFilter('all');
+                        setLinkedinFilter('all');
+                      }}
+                      className="btn btn-secondary"
+                      style={{ padding: '0.25rem 0.75rem', fontSize: '0.8rem', height: '30px', alignSelf: 'flex-end' }}
+                    >
+                      Clear Filters
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {loadingLeads && leads.length === 0 ? (
+                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
+                  Loading database...
+                </div>
+              ) : leads.length === 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
+                  <span style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>🌐</span>
+                  <p>No outreach targets registered yet.</p>
+                  <p style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>Enter a website URL or import a CSV on the left to start.</p>
+                </div>
+              ) : (() => {
+                const filteredLeads = leads.filter(lead => {
+                  if (domainFilter !== 'all' && lead.domain_status !== domainFilter) return false;
+                  if (adsTxtFilter !== 'all' && lead.ads_txt_status !== adsTxtFilter) return false;
+                  if (adsFilter !== 'all') {
+                    const hasAds = lead.ads_detected && lead.ads_detected.toLowerCase().startsWith('yes');
+                    if (adsFilter === 'yes' && !hasAds) return false;
+                    if (adsFilter === 'no' && hasAds) return false;
+                  }
+                  if (contactFilter !== 'all' && lead.contact_form_status !== contactFilter) return false;
+                  if (linkedinFilter !== 'all' && lead.linkedin_status !== linkedinFilter) return false;
+                  return true;
+                });
+
+                if (filteredLeads.length === 0) {
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '200px', color: 'var(--text-muted)' }}>
+                      <span>🔍</span>
+                      <p style={{ marginTop: '0.5rem' }}>No targets match the active filters.</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th style={{ width: '40px' }}>
                             <input 
-                              type="checkbox" 
-                              checked={!!selectedLeadIds[lead.id]}
+                              type="checkbox"
+                              checked={filteredLeads.length > 0 && filteredLeads.every(l => selectedLeadIds[l.id])}
                               onChange={(e) => {
                                 const checked = e.target.checked;
-                                setSelectedLeadIds(prev => ({ ...prev, [lead.id]: checked }));
+                                const newSelected: Record<string, boolean> = { ...selectedLeadIds };
+                                filteredLeads.forEach(l => {
+                                  if (checked) {
+                                    newSelected[l.id] = true;
+                                  } else {
+                                    delete newSelected[l.id];
+                                  }
+                                });
+                                setSelectedLeadIds(newSelected);
                               }}
                             />
-                          </td>
-                          <td style={{ fontWeight: 600 }}>
-                            <a 
-                              href={`https://${lead.website}`} 
-                              target="_blank" 
-                              rel="noopener noreferrer"
-                              className="lead-link"
-                            >
-                              {lead.website} <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>↗</span>
-                            </a>
-                          </td>
-                          <td>
-                            {editingPocLeadId === lead.id ? (
-                              <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
-                                <input
-                                  type="text"
-                                  value={pocNameEditVal}
-                                  onChange={(e) => setPocNameEditVal(e.target.value)}
-                                  className="form-control"
-                                  style={{
-                                    fontSize: '0.8rem',
-                                    padding: '0.2rem 0.4rem',
-                                    width: '120px',
-                                    height: 'auto',
-                                    background: 'var(--input-bg)',
-                                    border: '1px solid var(--input-border)',
-                                    color: 'var(--input-color)',
-                                    borderRadius: '4px'
-                                  }}
-                                  autoFocus
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      handleSavePocName(lead.id, pocNameEditVal);
-                                    } else if (e.key === 'Escape') {
-                                      setEditingPocLeadId(null);
-                                    }
+                          </th>
+                          <th>Website Domain</th>
+                          <th>POC Name</th>
+                          <th>Domain Status</th>
+                          <th>ads.txt</th>
+                          <th>Ads Appearing</th>
+                          <th>Contact Info</th>
+                          <th>LinkedIn</th>
+                          <th>Status / Outreach</th>
+                          <th style={{ textAlign: 'right' }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredLeads.map((lead) => {
+                          const emailsList = Array.from(new Set([
+                            ...(lead.manual_email ? [lead.manual_email] : []),
+                            ...(lead.fetched_emails || [])
+                          ]));
+                          const isCrawling = crawlingIds[lead.id];
+
+                          return (
+                            <tr key={lead.id} className={selectedLeadIds[lead.id] ? 'selected-row' : ''}>
+                              <td>
+                                <input 
+                                  type="checkbox" 
+                                  checked={!!selectedLeadIds[lead.id]}
+                                  onChange={(e) => {
+                                    const checked = e.target.checked;
+                                    setSelectedLeadIds(prev => ({ ...prev, [lead.id]: checked }));
                                   }}
                                 />
-                                <button
-                                  type="button"
-                                  className="btn btn-primary"
-                                  style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
-                                  onClick={() => handleSavePocName(lead.id, pocNameEditVal)}
-                                  title="Save"
+                              </td>
+                              <td style={{ fontWeight: 600 }}>
+                                <a 
+                                  href={`https://${lead.website}`} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="lead-link"
                                 >
-                                  ✓
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
-                                  onClick={() => setEditingPocLeadId(null)}
-                                  title="Cancel"
-                                >
-                                  ✕
-                                </button>
-                              </div>
-                            ) : (
-                              <div 
-                                style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}
-                                onClick={() => {
-                                  setEditingPocLeadId(lead.id);
-                                  setPocNameEditVal(lead.poc_name || '');
-                                }}
-                                title="Click to edit POC name"
-                              >
-                                {lead.poc_name ? (
-                                  <span style={{ color: 'var(--text-bright)', fontWeight: 500 }}>{lead.poc_name}</span>
-                                ) : (
-                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>Click to enter</span>
-                                )}
-                                <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>✏️</span>
-                              </div>
-                            )}
-                          </td>
-                          <td>
-                            {lead.domain_active ? (
-                              <span className="badge badge-success">
-                                <span style={{ 
-                                  width: '6px', 
-                                  height: '6px', 
-                                  borderRadius: '50%', 
-                                  background: '#10b981', 
-                                  display: 'inline-block', 
-                                  marginRight: '4px',
-                                  animation: 'pulse-dot 1.5s infinite' 
-                                }}></span>
-                                Online
-                              </span>
-                            ) : (
-                              <span className="badge badge-danger">Offline</span>
-                            )}
-                          </td>
-                          <td>
-                            {lead.similarweb_visits !== undefined && lead.similarweb_visits !== null ? (
-                              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                <strong style={{ color: 'var(--text-bright)' }}>
-                                  {new Intl.NumberFormat('en-US', { notation: 'compact' }).format(lead.similarweb_visits)}
-                                </strong>
-                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                                  {lead.similarweb_pages_per_visit ? `${lead.similarweb_pages_per_visit.toFixed(1)} p/v` : '-'}
-                                </span>
-                              </div>
-                            ) : (
-                              <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>
-                            )}
-                          </td>
-                          <td>
-                            {lead.similarweb_total_traffic !== undefined && lead.similarweb_total_traffic !== null ? (
-                              <strong style={{ color: 'var(--primary)', fontWeight: 700 }}>
-                                {new Intl.NumberFormat('en-US', { notation: 'compact' }).format(lead.similarweb_total_traffic)}
-                              </strong>
-                            ) : (
-                              <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>
-                            )}
-                          </td>
-                          <td>
-                            {Array.isArray(lead.similarweb_top_geos) && lead.similarweb_top_geos.length > 0 ? (
-                              <div className="geo-list">
-                                {lead.similarweb_top_geos.slice(0, 5).map((geo: any, idx: number) => (
-                                  <div key={idx} className="geo-badge">
-                                    <span>{geo.name}</span>
-                                    <strong style={{ color: 'var(--primary)', marginLeft: '4px' }}>
-                                      {(geo.share * 100).toFixed(0)}%
-                                    </strong>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>
-                            )}
-                          </td>
-                          <td>
-                            <div className="email-tags">
-                              {emailsList.length === 0 ? (
-                                <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>
-                                  {lead.status === 'pending' ? 'Crawl scheduled...' : 'No contact found'}
-                                </span>
-                              ) : (
-                                emailsList.map((email) => {
-                                  const isManual = email === lead.manual_email;
-                                  return (
-                                    <span 
-                                      key={email} 
-                                      className="email-tag" 
-                                      style={{ 
-                                        display: 'inline-flex', 
-                                        alignItems: 'center', 
-                                        gap: '0.25rem',
-                                        background: isManual ? 'rgba(16, 185, 129, 0.1)' : 'rgba(99, 102, 241, 0.1)', 
-                                        borderColor: isManual ? 'rgba(16, 185, 129, 0.2)' : 'rgba(99, 102, 241, 0.2)' 
+                                  {lead.website} <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>↗</span>
+                                </a>
+                              </td>
+                              <td>
+                                {editingPocLeadId === lead.id ? (
+                                  <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                                    <input
+                                      type="text"
+                                      value={pocNameEditVal}
+                                      onChange={(e) => setPocNameEditVal(e.target.value)}
+                                      className="form-control"
+                                      style={{
+                                        fontSize: '0.8rem',
+                                        padding: '0.2rem 0.4rem',
+                                        width: '120px',
+                                        height: 'auto',
+                                        background: 'var(--input-bg)',
+                                        border: '1px solid var(--input-border)',
+                                        color: 'var(--input-color)',
+                                        borderRadius: '4px'
                                       }}
+                                      autoFocus
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          handleSavePocName(lead.id, pocNameEditVal);
+                                        } else if (e.key === 'Escape') {
+                                          setEditingPocLeadId(null);
+                                        }
+                                      }}
+                                    />
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
+                                      onClick={() => handleSavePocName(lead.id, pocNameEditVal)}
+                                      title="Save"
                                     >
-                                      {email} {isManual && <small style={{ opacity: 0.7 }}>(man)</small>}
-                                      <button
-                                        type="button"
-                                        onClick={() => handleDeleteEmail(lead.id, email)}
-                                        style={{
-                                          background: 'none',
-                                          border: 'none',
-                                          color: 'rgba(239, 68, 68, 0.8)',
-                                          cursor: 'pointer',
-                                          padding: '0 2px',
-                                          fontSize: '0.9rem',
-                                          marginLeft: '2px',
-                                          lineHeight: 1,
-                                          fontWeight: 'bold',
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          justifyContent: 'center',
-                                          height: '14px',
-                                          width: '14px',
-                                          borderRadius: '50%'
-                                        }}
-                                        title="Delete email"
-                                      >
-                                        &times;
-                                      </button>
-                                    </span>
-                                  );
-                                })
-                              )}
-                            </div>
-                            <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
-                              <input
-                                type="email"
-                                placeholder="Add email..."
-                                style={{
-                                  fontSize: '0.75rem',
-                                  padding: '0.2rem 0.4rem',
-                                  background: 'var(--input-bg)',
-                                  border: '1px solid var(--input-border)',
-                                  borderRadius: '4px',
-                                  color: 'var(--input-color)',
-                                  width: '130px',
-                                  height: '24px'
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    const target = e.currentTarget;
-                                    const val = target.value.trim();
-                                    if (val) {
-                                      handleAddEmail(lead.id, val);
-                                      target.value = '';
-                                    }
-                                  }
-                                }}
-                              />
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem', height: '24px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                                onClick={(e) => {
-                                  const parent = e.currentTarget.parentElement;
-                                  if (parent) {
-                                    const input = parent.querySelector('input') as HTMLInputElement;
-                                    const val = input.value.trim();
-                                    if (val) {
-                                      handleAddEmail(lead.id, val);
-                                      input.value = '';
-                                    }
-                                  }
-                                }}
-                              >
-                                +
-                              </button>
-                            </div>
-                          </td>
-                          <td>
-                            {lead.status === 'reverted' ? (
-                              <span className="badge badge-success" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
-                                💬 Replied
-                              </span>
-                            ) : lead.status === 'clicked' ? (
-                              <span className="badge badge-info" style={{ background: 'rgba(6, 182, 212, 0.15)', color: '#06b6d4', border: '1px solid rgba(6, 182, 212, 0.3)' }}>
-                                🖱️ Clicked
-                              </span>
-                            ) : lead.status === 'opened' ? (
-                              <span className="badge badge-primary" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
-                                👁️ Opened
-                              </span>
-                            ) : lead.status === 'delivered' ? (
-                              <span className="badge badge-info" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
-                                📦 Delivered
-                              </span>
-                            ) : lead.status === 'bounced' ? (
-                              <span className="badge badge-danger">
-                                🚫 Bounced
-                              </span>
-                            ) : lead.status === 'outreach_sent' ? (
-                              <span className="badge badge-secondary" style={{ background: 'rgba(156, 163, 175, 0.15)', color: '#9ca3af', border: '1px solid rgba(156, 163, 175, 0.3)' }}>
-                                ✉️ Sent
-                              </span>
-                            ) : lead.status === 'active' ? (
-                              <span className="badge badge-warning" style={{ background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.2)' }}>Active</span>
-                            ) : lead.status === 'inactive' ? (
-                              <span className="badge badge-danger">Unavailable</span>
-                            ) : (
-                              <span className="badge" style={{ background: 'rgba(255,255,255,0.06)' }}>Pending</span>
-                            )}
-                          </td>
-                          <td style={{ textAlign: 'right' }}>
-                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.4rem' }}>
-                              <button
-                                className="btn btn-secondary"
-                                style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
-                                onClick={() => handleForceCrawl(lead.id)}
-                                disabled={isCrawling}
-                                title="Run email crawl check"
-                              >
-                                {isCrawling ? 'Crawling...' : 'Crawl'}
-                              </button>
-                              <button
-                                className="btn btn-primary"
-                                style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
-                                disabled={emailsList.length === 0 || !lead.domain_active}
-                                onClick={() => setActiveLeadForOutreach(lead)}
-                              >
-                                Outreach
-                              </button>
-                              <button
-                                className="btn btn-danger"
-                                style={{ padding: '0.35rem 0.5rem', fontSize: '0.75rem', background: '#ef4444', borderColor: '#ef4444' }}
-                                onClick={() => handleDeleteLead(lead.id)}
-                                title="Delete Lead"
-                              >
-                                🗑️
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            </div>
-          </main>
-        </div>
-      )}
+                                      ✓
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-secondary"
+                                      style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem' }}
+                                      onClick={() => setEditingPocLeadId(null)}
+                                      title="Cancel"
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div 
+                                    style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}
+                                    onClick={() => {
+                                      setEditingPocLeadId(lead.id);
+                                      setPocNameEditVal(lead.poc_name || '');
+                                    }}
+                                    title="Click to edit POC name"
+                                  >
+                                    {lead.poc_name ? (
+                                      <span style={{ color: 'var(--text-bright)', fontWeight: 500 }}>{lead.poc_name}</span>
+                                    ) : (
+                                      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', fontStyle: 'italic' }}>Click to enter</span>
+                                    )}
+                                    <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>✏️</span>
+                                  </div>
+                                )}
+                              </td>
+                              
+                              {/* Domain Status */}
+                              <td>
+                                {lead.domain_status === 'pass' ? (
+                                  <span className="badge badge-success">
+                                    <span style={{ 
+                                      width: '6px', 
+                                      height: '6px', 
+                                      borderRadius: '50%', 
+                                      background: '#10b981', 
+                                      display: 'inline-block', 
+                                      marginRight: '4px',
+                                      animation: 'pulse-dot 1.5s infinite' 
+                                    }}></span>
+                                    Pass
+                                  </span>
+                                ) : lead.domain_status === 'failed' ? (
+                                  <span className="badge badge-danger">Failed</span>
+                                ) : (
+                                  <span className="badge badge-secondary">Pending</span>
+                                )}
+                              </td>
 
-      {/* Originated Leads Tab */}
-      {activeTab === 'originated' && (
-        <main className="glass-panel" style={{ padding: '2rem', minHeight: '450px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+                              {/* ads.txt */}
+                              <td>
+                                {lead.ads_txt_status === 'present' ? (
+                                  <span className="badge badge-success">Present</span>
+                                ) : lead.ads_txt_status === 'not present' ? (
+                                  <span className="badge badge-secondary">Not Present</span>
+                                ) : (
+                                  <span className="badge badge-secondary">Pending</span>
+                                )}
+                              </td>
+
+                              {/* Ads Appearing */}
+                              <td>
+                                {lead.ads_detected && lead.ads_detected !== 'none' && lead.ads_detected !== 'no' && lead.ads_detected !== 'pending' ? (
+                                  <span className="badge badge-primary" style={{ fontSize: '0.78rem', padding: '0.2rem 0.5rem', whiteSpace: 'normal', maxWidth: '180px', display: 'inline-block', textAlign: 'left' }}>
+                                    {lead.ads_detected}
+                                  </span>
+                                ) : lead.ads_detected === 'no' || lead.ads_detected === 'none' ? (
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No</span>
+                                ) : (
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic' }}>Pending</span>
+                                )}
+                              </td>
+
+                              {/* Contact Info */}
+                              <td>
+                                {lead.best_email && (
+                                  <div style={{ marginBottom: '0.35rem' }}>
+                                    <span style={{ fontSize: '0.72rem', color: '#22c55e', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '4px', padding: '0.15rem 0.4rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                      ✅ <strong>{lead.best_email}</strong>
+                                    </span>
+                                  </div>
+                                )}
+                                
+                                <div style={{ marginBottom: '0.35rem' }}>
+                                  {lead.contact_form_status === 'email found' ? (
+                                    <span className="badge badge-success">Email Found</span>
+                                  ) : lead.contact_form_status === 'contact form available' ? (
+                                    <span className="badge badge-info">Form Available</span>
+                                  ) : lead.contact_form_status === 'none' ? (
+                                    <span className="badge badge-secondary">None</span>
+                                  ) : (
+                                    <span className="badge badge-secondary">Pending</span>
+                                  )}
+                                </div>
+
+                                <div className="email-tags">
+                                  {emailsList.length > 0 && (
+                                    emailsList.map((email) => {
+                                      const isManual = email === lead.manual_email;
+                                      const isBest = email === lead.best_email;
+                                      return (
+                                        <span 
+                                          key={email} 
+                                          className="email-tag" 
+                                          style={{ 
+                                            display: 'inline-flex', 
+                                            alignItems: 'center', 
+                                            gap: '0.25rem',
+                                            background: isManual ? 'rgba(16, 185, 129, 0.1)' : isBest ? 'rgba(34,197,94,0.08)' : 'rgba(99, 102, 241, 0.1)', 
+                                            borderColor: isManual ? 'rgba(16, 185, 129, 0.2)' : isBest ? 'rgba(34,197,94,0.2)' : 'rgba(99, 102, 241, 0.2)' 
+                                          }}
+                                        >
+                                          {email} {isManual && <small style={{ opacity: 0.7 }}>(man)</small>}
+                                          <button
+                                            type="button"
+                                            onClick={() => handleDeleteEmail(lead.id, email)}
+                                            style={{
+                                              background: 'none',
+                                              border: 'none',
+                                              color: 'rgba(239, 68, 68, 0.8)',
+                                              cursor: 'pointer',
+                                              padding: '0 2px',
+                                              fontSize: '0.9rem',
+                                              marginLeft: '2px',
+                                              lineHeight: 1,
+                                              fontWeight: 'bold',
+                                              display: 'inline-flex',
+                                              alignItems: 'center',
+                                              justifyContent: 'center',
+                                              height: '14px',
+                                              width: '14px',
+                                              borderRadius: '50%'
+                                            }}
+                                            title="Delete email"
+                                          >
+                                            &times;
+                                          </button>
+                                        </span>
+                                      );
+                                    })
+                                  )}
+                                </div>
+                                <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                                  <input
+                                    type="email"
+                                    placeholder="Add email..."
+                                    style={{
+                                      fontSize: '0.75rem',
+                                      padding: '0.2rem 0.4rem',
+                                      background: 'var(--input-bg)',
+                                      border: '1px solid var(--input-border)',
+                                      borderRadius: '4px',
+                                      color: 'var(--input-color)',
+                                      width: '130px',
+                                      height: '24px'
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        const target = e.currentTarget;
+                                        const val = target.value.trim();
+                                        if (val) {
+                                          handleAddEmail(lead.id, val);
+                                          target.value = '';
+                                        }
+                                      }
+                                    }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    style={{ padding: '0.2rem 0.4rem', fontSize: '0.75rem', height: '24px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                                    onClick={(e) => {
+                                      const parent = e.currentTarget.parentElement;
+                                      if (parent) {
+                                        const input = parent.querySelector('input') as HTMLInputElement;
+                                        const val = input.value.trim();
+                                        if (val) {
+                                          handleAddEmail(lead.id, val);
+                                          input.value = '';
+                                        }
+                                      }
+                                    }}
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                              </td>
+
+                              {/* LinkedIn */}
+                              <td>
+                                {lead.linkedin_status === 'working' ? (
+                                  <span className="badge badge-info">Working</span>
+                                ) : lead.linkedin_status === 'none' ? (
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>None</span>
+                                ) : (
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic' }}>Pending</span>
+                                )}
+                              </td>
+
+                              {/* Outreach Status */}
+                              <td>
+                                {lead.status === 'reverted' ? (
+                                  <span className="badge badge-success" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                                    💬 Replied
+                                  </span>
+                                ) : lead.status === 'clicked' ? (
+                                  <span className="badge badge-info" style={{ background: 'rgba(6, 182, 212, 0.15)', color: '#06b6d4', border: '1px solid rgba(6, 182, 212, 0.3)' }}>
+                                    🖱️ Clicked
+                                  </span>
+                                ) : lead.status === 'opened' ? (
+                                  <span className="badge badge-primary" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                                    👁️ Opened
+                                  </span>
+                                ) : lead.status === 'delivered' ? (
+                                  <span className="badge badge-info" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
+                                    📦 Delivered
+                                  </span>
+                                ) : lead.status === 'bounced' ? (
+                                  <span className="badge badge-danger">
+                                    🚫 Bounced
+                                  </span>
+                                ) : lead.status === 'outreach_sent' ? (
+                                  <span className="badge badge-secondary" style={{ background: 'rgba(156, 163, 175, 0.15)', color: '#9ca3af', border: '1px solid rgba(156, 163, 175, 0.3)' }}>
+                                    ✉️ Sent
+                                  </span>
+                                ) : lead.status === 'active' ? (
+                                  <span className="badge badge-warning" style={{ background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.2)' }}>Active</span>
+                                ) : lead.status === 'inactive' ? (
+                                  <span className="badge badge-danger">Unavailable</span>
+                                ) : (
+                                  <span className="badge" style={{ background: 'rgba(255,255,255,0.06)' }}>Pending</span>
+                                )}
+                              </td>
+
+                              <td style={{ textAlign: 'right' }}>
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.4rem' }}>
+                                  <button
+                                    className="btn btn-secondary"
+                                    style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
+                                    onClick={() => handleForceCrawl(lead.id)}
+                                    disabled={isCrawling}
+                                    title="Run email crawl check"
+                                  >
+                                    {isCrawling ? 'Crawling...' : 'Crawl'}
+                                  </button>
+                                  <button
+                                    className="btn btn-primary"
+                                    style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
+                                    disabled={emailsList.length === 0 || lead.domain_status !== 'pass'}
+                                    onClick={() => setActiveLeadForOutreach(lead)}
+                                  >
+                                    Outreach
+                                  </button>
+                                  <button
+                                    className="btn btn-danger"
+                                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.75rem', background: '#ef4444', borderColor: '#ef4444' }}
+                                    onClick={() => handleDeleteLead(lead.id)}
+                                    title="Delete Lead"
+                                  >
+                                    🗑️
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+
+      {/* Agent Tab */}
+      {activeTab === 'agent' && (
+        <main style={{ padding: '2rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <h2 className="card-title" style={{ margin: 0 }}>🌱 New Leads Originated</h2>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
-                These are competitor websites extracted from your uploaded sheets. Convert them to targets to trigger crawling and outreach.
-              </p>
+              <h2 className="card-title" style={{ marginBottom: '0.25rem' }}>🤖 Dockships Agent</h2>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Daily system health checks, analytics reports to Slack, and control via reply commands.</p>
             </div>
-            <button 
-              className="btn btn-secondary" 
-              onClick={fetchOriginatedLeads} 
-              disabled={loadingOriginated}
-              style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+            <button
+              className="btn btn-primary"
+              onClick={handleRunAgent}
+              disabled={agentRunning}
+              style={{ padding: '0.6rem 1.4rem', fontSize: '0.9rem' }}
             >
-              Refresh
+              {agentRunning ? '⏳ Running...' : '▶ Run Agent Now'}
             </button>
           </div>
-
-          {loadingOriginated ? (
-            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
-              Loading originated leads...
-            </div>
-          ) : originatedLeads.length === 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
-              <span style={{ fontSize: '2rem' }}>🌱</span>
-              <p style={{ marginTop: '0.5rem' }}>No originated leads found. Upload a sheet with a competitor column to discover new leads.</p>
-            </div>
-          ) : (
-            <div className="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Website / Domain</th>
-                    <th>Emerged From (Source)</th>
-                    <th>Found Date</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {originatedLeads.map((orig) => (
-                    <tr key={orig.id} className="animate-fade">
-                      <td>
-                        <a 
-                          href={`https://${orig.website}`} 
-                          target="_blank" 
-                          rel="noreferrer"
-                          style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}
-                        >
-                          {orig.website}
-                        </a>
-                      </td>
-                      <td>
-                        <span className="badge" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', padding: '0.2rem 0.6rem', borderRadius: '4px', fontSize: '0.8rem', color: 'var(--text-bright)' }}>
-                          {orig.source_website}
-                        </span>
-                      </td>
-                      <td style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                        {new Date(orig.created_at || Date.now()).toLocaleDateString(undefined, {
-                          month: 'short',
-                          day: 'numeric',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit'
-                        })}
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          <button 
-                            className="btn btn-primary"
-                            onClick={() => handleConvertOriginated(orig.id)}
-                            style={{ padding: '0.35rem 0.8rem', fontSize: '0.8rem' }}
-                          >
-                            🎯 Convert to Target
-                          </button>
-                          <button 
-                            className="btn btn-danger"
-                            onClick={() => handleDeleteOriginated(orig.id)}
-                            style={{ padding: '0.35rem 0.8rem', fontSize: '0.8rem', background: 'transparent', border: '1px solid rgba(239, 68, 68, 0.4)', color: '#ef4444' }}
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          {agentMessage && (
+            <div style={{ padding: '0.8rem 1rem', background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)', borderRadius: '8px', fontSize: '0.9rem', color: '#a5b4fc' }}>
+              ✅ {agentMessage}
             </div>
           )}
+
+          {/* System Stats Snapshot */}
+          {agentStats && (
+            <div className="glass-panel" style={{ padding: '1.5rem' }}>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-bright)' }}>📊 System Snapshot</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '1rem' }}>
+                {[
+                  { label: 'Total Leads', value: agentStats.totalLeads, color: '#6366f1' },
+                  { label: 'Active Leads', value: agentStats.activeLeads, color: '#22c55e' },
+                  { label: 'Pending Crawl', value: agentStats.pendingLeads, color: '#f59e0b' },
+                  { label: 'Emails Sent', value: agentStats.totalEmailsSent, color: '#3b82f6' },
+                  { label: 'Sent (24h)', value: agentStats.recentlySent, color: '#8b5cf6' },
+                  { label: 'Bounced', value: agentStats.bouncedEmails, color: '#ef4444' },
+                  { label: 'Open Rate', value: `${agentStats.openRate?.toFixed(1)}%`, color: '#10b981' },
+                  { label: 'Reply Rate', value: `${agentStats.replyRate?.toFixed(1)}%`, color: '#06b6d4' },
+                ].map(({ label, value, color }) => (
+                  <div key={label} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '10px', padding: '1rem', textAlign: 'center' }}>
+                    <div style={{ fontSize: '1.6rem', fontWeight: 700, color }}>{value}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>{label}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+                <div style={{ padding: '0.6rem 1rem', borderRadius: '8px', background: agentStats.crawlerHealth === 'healthy' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', border: `1px solid ${agentStats.crawlerHealth === 'healthy' ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`, fontSize: '0.85rem' }}>
+                  {agentStats.crawlerHealth === 'healthy' ? '✅' : '⚠️'} Crawler: <strong>{agentStats.crawlerHealth}</strong>
+                </div>
+                <div style={{ padding: '0.6rem 1rem', borderRadius: '8px', background: agentStats.emailServiceHealth === 'healthy' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', border: `1px solid ${agentStats.emailServiceHealth === 'healthy' ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`, fontSize: '0.85rem' }}>
+                  {agentStats.emailServiceHealth === 'healthy' ? '✅' : '⚠️'} Email Service: <strong>{agentStats.emailServiceHealth}</strong>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Slack Configuration */}
+          <div className="glass-panel" style={{ padding: '1.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-bright)' }}>
+                🔔 Slack Integration
+              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: slackSettings?.configured ? '#22c55e' : '#6b7280', display: 'inline-block' }} />
+                {slackSettings?.configured ? 'Connected' : 'Not configured'}
+              </div>
+            </div>
+            <form onSubmit={handleSaveSlackSettings} style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.35rem' }}>Bot Token (xoxb-...)</label>
+                  <input
+                    className="input-field"
+                    type="password"
+                    placeholder="xoxb-your-slack-bot-token"
+                    value={slackBotToken}
+                    onChange={e => setSlackBotToken(e.target.value)}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.35rem' }}>Channel</label>
+                  <input
+                    className="input-field"
+                    type="text"
+                    placeholder="#dockships-alerts"
+                    value={slackChannel}
+                    onChange={e => setSlackChannel(e.target.value)}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.35rem' }}>Signing Secret (optional)</label>
+                  <input
+                    className="input-field"
+                    type="password"
+                    placeholder="Slack app signing secret"
+                    value={slackSigningSecret}
+                    onChange={e => setSlackSigningSecret(e.target.value)}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.35rem' }}>Incoming Webhook URL (alternative)</label>
+                  <input
+                    className="input-field"
+                    type="text"
+                    placeholder="https://hooks.slack.com/services/..."
+                    value={slackWebhookUrl}
+                    onChange={e => setSlackWebhookUrl(e.target.value)}
+                    style={{ width: '100%' }}
+                  />
+                </div>
+              </div>
+              {slackStatus.success && <div style={{ color: '#22c55e', fontSize: '0.85rem' }}>✅ {slackStatus.success}</div>}
+              {slackStatus.error && <div style={{ color: '#ef4444', fontSize: '0.85rem' }}>❌ {slackStatus.error}</div>}
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <button type="submit" className="btn btn-primary" disabled={savingSlack}>
+                  {savingSlack ? 'Saving...' : '💾 Save Slack Settings'}
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={handleTestSlack} disabled={testingSlack || (!slackSettings?.configured)}>
+                  {testingSlack ? 'Sending...' : '📨 Send Test Message'}
+                </button>
+              </div>
+            </form>
+            <div style={{ marginTop: '1.25rem', padding: '1rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+              <strong style={{ color: 'var(--text-bright)' }}>Webhook URL for your Slack app:</strong>
+              <code style={{ display: 'block', marginTop: '0.35rem', background: 'rgba(0,0,0,0.2)', padding: '0.4rem 0.6rem', borderRadius: '4px', fontSize: '0.8rem' }}>
+                POST {window.location.origin.replace(':5173', ':4001')}/api/slack/webhook
+              </code>
+              <p style={{ marginTop: '0.5rem' }}>Configure this URL in your Slack app's <em>Interactivity & Shortcuts</em> and <em>Slash Commands</em> settings.</p>
+            </div>
+          </div>
+
+          {/* Commands Reference */}
+          <div className="glass-panel" style={{ padding: '1.5rem' }}>
+            <h3 style={{ fontSize: '0.95rem', fontWeight: 600, marginBottom: '1rem', color: 'var(--text-bright)' }}>💬 Available Slack Commands</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem' }}>
+              {[
+                { cmd: 'status', desc: 'System health check — DB, crawler, email service' },
+                { cmd: 'report', desc: 'Trigger an immediate analytics report' },
+                { cmd: 'leads', desc: 'List top 10 most recent leads' },
+                { cmd: 'emails', desc: 'Email stats — open, click, bounce, reply rates' },
+                { cmd: 'pause', desc: 'Note to pause outbound email sending' },
+                { cmd: 'resume', desc: 'Resume outbound email sending' },
+                { cmd: 'recrawl', desc: 'Re-crawl all stuck pending leads' },
+                { cmd: 'help', desc: 'Show all available commands' },
+              ].map(({ cmd, desc }) => (
+                <div key={cmd} style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start', padding: '0.6rem 0.75rem', background: 'rgba(255,255,255,0.03)', borderRadius: '8px' }}>
+                  <code style={{ fontSize: '0.8rem', color: '#818cf8', background: 'rgba(99,102,241,0.15)', padding: '0.2rem 0.4rem', borderRadius: '4px', whiteSpace: 'nowrap' }}>{cmd}</code>
+                  <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>{desc}</span>
+                </div>
+              ))}
+            </div>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '1rem' }}>
+              📅 The agent runs automatically every day at <strong>9:00 AM</strong> and posts a full analytics report. You can also click <strong>▶ Run Agent Now</strong> above to trigger it immediately.
+            </p>
+          </div>
         </main>
       )}
 
@@ -1508,6 +1785,68 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             Track opens, clicks, delivery states, and replies automatically. Override statuses manually or trigger simulation events.
           </p>
 
+          {/* Email Stats Cards */}
+          {emailStats && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
+              {[
+                { label: 'Total Sent', value: emailStats.total, color: '#6366f1', icon: '📬' },
+                { label: 'Delivered', value: emailStats.delivered, color: '#3b82f6', icon: '📩' },
+                { label: 'Opened', value: emailStats.opened, color: '#10b981', icon: '👁' },
+                { label: 'Clicked', value: emailStats.clicked, color: '#8b5cf6', icon: '🖱' },
+                { label: 'Replied', value: emailStats.replied, color: '#06b6d4', icon: '↩️' },
+                { label: 'Bounced', value: emailStats.bounced, color: '#ef4444', icon: '⛔' },
+              ].map(({ label, value, color, icon }) => (
+                <div key={label} style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${color}33`, borderRadius: '10px', padding: '0.85rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.1rem', marginBottom: '0.2rem' }}>{icon}</div>
+                  <div style={{ fontSize: '1.4rem', fontWeight: 700, color }}>{value}</div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>{label}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {emailStats && emailStats.total > 0 && (
+            <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
+              {[
+                { label: 'Open Rate', value: emailStats.openRate, color: '#10b981' },
+                { label: 'Click Rate', value: emailStats.clickRate, color: '#8b5cf6' },
+                { label: 'Reply Rate', value: emailStats.replyRate, color: '#06b6d4' },
+                { label: 'Bounce Rate', value: emailStats.bounceRate, color: '#ef4444' },
+              ].map(({ label, value, color }) => (
+                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.82rem' }}>
+                  <div style={{ width: '80px', height: '6px', borderRadius: '3px', background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${Math.min(value, 100)}%`, background: color, borderRadius: '3px' }} />
+                  </div>
+                  <span style={{ color: 'var(--text-muted)' }}>{label}:</span>
+                  <span style={{ color, fontWeight: 600 }}>{value.toFixed(1)}%</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Filter bar */}
+          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1.25rem' }}>
+            {(['all', 'sent', 'delivered', 'opened', 'clicked', 'reverted', 'bounced'] as const).map(f => (
+              <button
+                key={f}
+                className={`btn ${logsFilter === f ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setLogsFilter(f)}
+                style={{ padding: '0.3rem 0.7rem', fontSize: '0.78rem', textTransform: 'capitalize' }}
+              >
+                {f === 'reverted' ? 'Replied' : f}
+                {emailStats && f !== 'all' && (
+                  <span style={{ marginLeft: '0.3rem', opacity: 0.7 }}>
+                    ({f === 'sent' ? emailStats.total - emailStats.delivered - emailStats.bounced
+                      : f === 'delivered' ? emailStats.delivered
+                      : f === 'opened' ? emailStats.opened
+                      : f === 'clicked' ? emailStats.clicked
+                      : f === 'reverted' ? emailStats.replied
+                      : emailStats.bounced})
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
           {loadingLogs ? (
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
               Retrieving logs...
@@ -1517,143 +1856,112 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
               <span>✉️</span>
               <p style={{ marginTop: '0.5rem' }}>No outreach emails dispatched yet.</p>
             </div>
-          ) : (
-            <div className="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Sent At</th>
-                    <th>Recipient</th>
-                    <th>Subject</th>
-                    <th>Email Status Tracker</th>
-                    <th>Simulators</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {emailLogs.map((log) => (
-                    <tr key={log.id}>
-                      <td>{new Date(log.sent_at).toLocaleString()}</td>
-                      <td style={{ fontWeight: 600 }}>{log.recipient_email}</td>
-                      <td>{log.subject}</td>
-                      <td>
-                        <span className={`badge ${
-                          log.status === 'reverted' ? 'badge-success' :
-                          log.status === 'clicked' ? 'badge-info' :
-                          log.status === 'opened' ? 'badge-primary' :
-                          log.status === 'delivered' ? 'badge-info' :
-                          log.status === 'bounced' ? 'badge-danger' : 'badge-secondary'
-                        }`} style={{ fontSize: '0.75rem' }}>
-                          {log.status === 'reverted' ? 'Replied' :
-                           log.status === 'clicked' ? 'Clicked' :
-                           log.status === 'opened' ? 'Opened' :
-                           log.status === 'delivered' ? 'Delivered' :
-                           log.status === 'bounced' ? 'Bounced' : 'Sent'}
-                        </span>
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', gap: '0.4rem' }}>
-                          <button
-                            className="btn btn-secondary"
-                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
-                            onClick={() => handleSimulateReply(log.recipient_email)}
-                            title="Simulate recipient replying to this email"
-                          >
-                            💬 Reply
-                          </button>
-                          <button
-                            className="btn btn-secondary"
-                            style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--danger)' }}
-                            onClick={() => handleSimulateBounce(log.recipient_email)}
-                            title="Simulate Mailgun permanent bounce event"
-                          >
-                            🚫 Bounce
-                          </button>
-                        </div>
-                      </td>
+          ) : (() => {
+            const filteredLogs = logsFilter === 'all'
+              ? emailLogs
+              : emailLogs.filter(l => l.status === logsFilter);
+            return filteredLogs.length === 0 ? (
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '120px', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                No emails with status "{logsFilter}" found.
+              </div>
+            ) : (
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Sent At</th>
+                      <th>Recipient</th>
+                      <th>Subject</th>
+                      <th>Status</th>
+                      <th>Replies</th>
+                      <th>Simulators</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </main>
-      )}
-
-      {/* Task Scheduler Tab */}
-      {activeTab === 'cron' && (
-        <main className="glass-panel" style={{ padding: '2rem', minHeight: '450px' }}>
-          <h2 className="card-title">⏰ Cron Jobs & Scheduled Tasks</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1.5rem' }}>
-            Manage and monitor automated background tasks (e.g. status checkers, system syncing). Tasks can be toggled on/off, or triggered immediately.
-          </p>
-
-          {loadingCron && cronJobs.length === 0 ? (
-            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
-              Retrieving scheduler details...
-            </div>
-          ) : cronJobs.length === 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
-              <span>⏰</span>
-              <p style={{ marginTop: '0.5rem' }}>No cron jobs configured in system database.</p>
-            </div>
-          ) : (
-            <div className="table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Job Name</th>
-                    <th>Cron Expression</th>
-                    <th>Job Type</th>
-                    <th>Last Run Time</th>
-                    <th>State</th>
-                    <th style={{ textAlign: 'right' }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cronJobs.map((job) => (
-                    <tr key={job.id}>
-                      <td style={{ fontWeight: 600, color: 'var(--text-bright)' }}>{job.name}</td>
-                      <td>
-                        <code style={{ background: 'rgba(0,0,0,0.15)', padding: '0.2rem 0.4rem', borderRadius: '4px', fontSize: '0.85rem' }}>
-                          {job.expression}
-                        </code>
-                      </td>
-                      <td>{job.job_type}</td>
-                      <td>
-                        {job.last_run ? (
-                          new Date(job.last_run).toLocaleString()
-                        ) : (
-                          <span style={{ fontStyle: 'italic', color: 'var(--text-muted)' }}>Never run</span>
-                        )}
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <span className={`badge ${job.active === 1 ? 'badge-success' : 'badge-secondary'}`}>
-                            {job.active === 1 ? 'Active' : 'Disabled'}
-                          </span>
-                          <input 
-                            type="checkbox" 
-                            checked={job.active === 1}
-                            onChange={(e) => handleToggleCron(job.id, e.target.checked)}
-                            style={{ cursor: 'pointer' }}
-                          />
-                        </div>
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <button
-                          className="btn btn-primary"
-                          style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
-                          onClick={() => handleRunCron(job.id)}
+                  </thead>
+                  <tbody>
+                    {filteredLogs.map((log) => (
+                      <React.Fragment key={log.id}>
+                        <tr
+                          onClick={() => fetchEmailEvents(log.id)}
+                          style={{ cursor: 'pointer' }}
+                          title="Click to view event timeline"
                         >
-                          ⚡ Run Now
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                          <td>{new Date(log.sent_at).toLocaleString()}</td>
+                          <td style={{ fontWeight: 600 }}>
+                            <div>{log.recipient_email}</div>
+                            {log.bounce_reason && (
+                              <div style={{ fontSize: '0.72rem', color: '#ef4444', marginTop: '0.1rem' }}>⛔ {log.bounce_reason}</div>
+                            )}
+                          </td>
+                          <td>{log.subject}</td>
+                          <td>
+                            <span className={`badge ${
+                              log.status === 'reverted' ? 'badge-success' :
+                              log.status === 'clicked' ? 'badge-info' :
+                              log.status === 'opened' ? 'badge-primary' :
+                              log.status === 'delivered' ? 'badge-info' :
+                              log.status === 'bounced' ? 'badge-danger' : 'badge-secondary'
+                            }`} style={{ fontSize: '0.75rem' }}>
+                              {log.status === 'reverted' ? 'Replied' :
+                               log.status === 'clicked' ? 'Clicked' :
+                               log.status === 'opened' ? 'Opened' :
+                               log.status === 'delivered' ? 'Delivered' :
+                               log.status === 'bounced' ? 'Bounced' : 'Sent'}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                            {log.reply_count || 0}
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', gap: '0.4rem' }}>
+                              <button
+                                className="btn btn-secondary"
+                                style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                                onClick={(e) => { e.stopPropagation(); handleSimulateReply(log.recipient_email); }}
+                                title="Simulate recipient replying to this email"
+                              >
+                                💬 Reply
+                              </button>
+                              <button
+                                className="btn btn-secondary"
+                                style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--danger)' }}
+                                onClick={(e) => { e.stopPropagation(); handleSimulateBounce(log.recipient_email); }}
+                                title="Simulate Mailgun permanent bounce event"
+                              >
+                                🚫 Bounce
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                        {expandedEmailId === log.id && (
+                          <tr>
+                            <td colSpan={6} style={{ padding: '0.75rem 1rem', background: 'rgba(0,0,0,0.2)' }}>
+                              {loadingEvents[log.id] ? (
+                                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>Loading event timeline...</span>
+                              ) : (emailEvents[log.id] || []).length === 0 ? (
+                                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>No events recorded yet for this email.</span>
+                              ) : (
+                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                  {(emailEvents[log.id] || []).map((ev, i) => (
+                                    <div key={ev.id} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem' }}>
+                                      <span style={{ color: ev.event_type === 'bounced' ? '#ef4444' : ev.event_type === 'reverted' ? '#22c55e' : ev.event_type === 'clicked' ? '#8b5cf6' : ev.event_type === 'opened' ? '#10b981' : '#6366f1' }}>
+                                        {{sent:'📤',delivered:'📩',opened:'👁',clicked:'🖱',reverted:'↩️',bounced:'⛔'}[ev.event_type] || '•'} {ev.event_type}
+                                      </span>
+                                      <span style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>{new Date(ev.event_time).toLocaleTimeString()}</span>
+                                      {i < (emailEvents[log.id] || []).length - 1 && <span style={{ color: 'var(--text-muted)' }}>→</span>}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
         </main>
       )}
 

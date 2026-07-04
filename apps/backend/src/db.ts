@@ -106,6 +106,27 @@ export async function initializeSchema(): Promise<void> {
       console.warn('Warning: PRAGMA foreign_keys = ON failed:', pragmaErr);
     }
     
+    // Clean up old tables we no longer support
+    await runQuery('DROP TABLE IF EXISTS dockships_originated_leads;');
+    await runQuery('DROP TABLE IF EXISTS dockships_cron_jobs;');
+
+    // Drop and recreate leads table to reset SimilarWeb metrics and use simplified validation columns
+    // We check if the table has the old columns first. If it does, we drop and rebuild it.
+    let rebuildLeads = false;
+    try {
+      const row = await getRow<any>('SELECT similarweb_visits FROM dockships_leads LIMIT 1');
+      if (row !== undefined) {
+        rebuildLeads = true;
+      }
+    } catch (e) {
+      // Table doesn't exist, or doesn't have similarweb_visits, which is fine
+    }
+
+    if (rebuildLeads) {
+      console.log('Detected old SimilarWeb columns. Rebuilding dockships_leads table...');
+      await runQuery('DROP TABLE IF EXISTS dockships_leads;');
+    }
+
     // Users table
     await runQuery(`
       CREATE TABLE IF NOT EXISTS dockships_users (
@@ -116,23 +137,23 @@ export async function initializeSchema(): Promise<void> {
       );
     `);
 
-    // Leads table
+    // Simplified Leads table
     await runQuery(`
       CREATE TABLE IF NOT EXISTS dockships_leads (
         id TEXT PRIMARY KEY,
         website TEXT UNIQUE NOT NULL,
         manual_email TEXT,
         fetched_emails TEXT DEFAULT '[]',
-        domain_active INTEGER DEFAULT 0,
+        best_email TEXT,
+        email_validation_status TEXT DEFAULT 'pending',
+        domain_status TEXT DEFAULT 'pending',
+        ads_txt_status TEXT DEFAULT 'pending',
+        ads_detected TEXT DEFAULT 'pending',
+        contact_form_status TEXT DEFAULT 'pending',
+        linkedin_status TEXT DEFAULT 'pending',
         status TEXT DEFAULT 'pending',
         crawled_at TEXT,
         poc_name TEXT,
-        similarweb_visits INTEGER,
-        similarweb_pages_per_visit REAL,
-        similarweb_total_traffic REAL,
-        similarweb_top_geos TEXT,
-        similarweb_country TEXT,
-        similarweb_fetched_at TEXT,
         created_at TEXT DEFAULT (datetime('now'))
       );
     `);
@@ -146,11 +167,27 @@ export async function initializeSchema(): Promise<void> {
         subject TEXT NOT NULL,
         body TEXT NOT NULL,
         status TEXT DEFAULT 'sent',
+        email_provider TEXT DEFAULT 'unknown',
+        bounce_reason TEXT,
+        reply_count INTEGER DEFAULT 0,
         sent_at TEXT DEFAULT (datetime('now')),
+        delivered_at TEXT,
         opened_at TEXT,
         clicked_at TEXT,
         reverted_at TEXT,
         FOREIGN KEY (lead_id) REFERENCES dockships_leads(id) ON DELETE CASCADE
+      );
+    `);
+
+    // Email Events table — granular event timeline
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_email_events (
+        id TEXT PRIMARY KEY,
+        email_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        event_time TEXT NOT NULL DEFAULT (datetime('now')),
+        metadata TEXT,
+        FOREIGN KEY (email_id) REFERENCES dockships_emails(id) ON DELETE CASCADE
       );
     `);
 
@@ -167,20 +204,8 @@ export async function initializeSchema(): Promise<void> {
         mailgun_api_key TEXT,
         mailgun_domain TEXT,
         active_service TEXT DEFAULT 'smtp',
+        demo_mode INTEGER DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES dockships_users(id) ON DELETE CASCADE
-      );
-    `);
-
-    // Cron Jobs table
-    await runQuery(`
-      CREATE TABLE IF NOT EXISTS dockships_cron_jobs (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        expression TEXT NOT NULL,
-        job_type TEXT NOT NULL,
-        active INTEGER DEFAULT 1,
-        last_run TEXT,
-        created_at TEXT DEFAULT (datetime('now'))
       );
     `);
 
@@ -194,14 +219,15 @@ export async function initializeSchema(): Promise<void> {
       );
     `);
 
-    // Originated Leads table
+    // Slack Settings table
     await runQuery(`
-      CREATE TABLE IF NOT EXISTS dockships_originated_leads (
-        id TEXT PRIMARY KEY,
-        website TEXT NOT NULL,
-        source_website TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now')),
-        UNIQUE(website, source_website)
+      CREATE TABLE IF NOT EXISTS dockships_slack_settings (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        bot_token TEXT,
+        channel TEXT DEFAULT '#dockships-alerts',
+        signing_secret TEXT,
+        webhook_url TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
       );
     `);
 
@@ -215,39 +241,45 @@ export async function initializeSchema(): Promise<void> {
 }
 
 async function runMigrations() {
+  // Add new columns to leads if the table was not dropped/recreated
+  try { await runQuery("ALTER TABLE dockships_leads ADD COLUMN domain_status TEXT DEFAULT 'pending';"); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_leads ADD COLUMN ads_txt_status TEXT DEFAULT 'pending';"); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_leads ADD COLUMN ads_detected TEXT DEFAULT 'pending';"); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_leads ADD COLUMN contact_form_status TEXT DEFAULT 'pending';"); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_leads ADD COLUMN linkedin_status TEXT DEFAULT 'pending';"); } catch (e) {}
+  
+  // Standard migrations for other tables
   try { await runQuery('ALTER TABLE dockships_smtp_settings ADD COLUMN mailgun_api_key TEXT;'); } catch (e) {}
   try { await runQuery('ALTER TABLE dockships_smtp_settings ADD COLUMN mailgun_domain TEXT;'); } catch (e) {}
   try { await runQuery("ALTER TABLE dockships_smtp_settings ADD COLUMN active_service TEXT DEFAULT 'smtp';"); } catch (e) {}
+  try { await runQuery('ALTER TABLE dockships_smtp_settings ADD COLUMN demo_mode INTEGER DEFAULT 0;'); } catch (e) {}
   try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN poc_name TEXT;'); } catch (e) {}
-  try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_visits INTEGER;'); } catch (e) {}
-  try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_country TEXT;'); } catch (e) {}
-  try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_fetched_at TEXT;'); } catch (e) {}
-  try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_pages_per_visit REAL;'); } catch (e) {}
-  try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_total_traffic REAL;'); } catch (e) {}
-  try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN similarweb_top_geos TEXT;'); } catch (e) {}
+  try { await runQuery('ALTER TABLE dockships_leads ADD COLUMN best_email TEXT;'); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_leads ADD COLUMN email_validation_status TEXT DEFAULT 'pending';"); } catch (e) {}
+  
   try { await runQuery('ALTER TABLE dockships_emails ADD COLUMN opened_at TEXT;'); } catch (e) {}
   try { await runQuery('ALTER TABLE dockships_emails ADD COLUMN clicked_at TEXT;'); } catch (e) {}
   try { await runQuery('ALTER TABLE dockships_emails ADD COLUMN reverted_at TEXT;'); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_emails ADD COLUMN email_provider TEXT DEFAULT 'unknown';"); } catch (e) {}
+  try { await runQuery('ALTER TABLE dockships_emails ADD COLUMN bounce_reason TEXT;'); } catch (e) {}
+  try { await runQuery('ALTER TABLE dockships_emails ADD COLUMN reply_count INTEGER DEFAULT 0;'); } catch (e) {}
+  try { await runQuery('ALTER TABLE dockships_emails ADD COLUMN delivered_at TEXT;'); } catch (e) {}
+
+  try {
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_slack_settings (
+        id INTEGER PRIMARY KEY DEFAULT 1,
+        bot_token TEXT,
+        channel TEXT DEFAULT '#dockships-alerts',
+        signing_secret TEXT,
+        webhook_url TEXT,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+  } catch (e) {}
 }
 
 async function seedDefaultData() {
-  try {
-    const checkCron = await getRow<{ count: number }>('SELECT count(*) as count FROM dockships_cron_jobs');
-    if (checkCron && checkCron.count === 0) {
-      await runQuery(`
-        INSERT INTO dockships_cron_jobs (id, name, expression, job_type, active)
-        VALUES ('cron-1', 'Hourly Leads Status Checker', '0 * * * *', 'hourly_status_check', 1)
-      `);
-      await runQuery(`
-        INSERT INTO dockships_cron_jobs (id, name, expression, job_type, active)
-        VALUES ('cron-2', 'Daily Analytics Cleanup & Sync', '0 0 * * *', 'daily_analytics_sync', 0)
-      `);
-      console.log('Default cron jobs seeded.');
-    }
-  } catch (cronErr) {
-    console.error('Error seeding cron jobs:', cronErr);
-  }
-
   try {
     const checkDrafts = await getRow<{ count: number }>('SELECT count(*) as count FROM dockships_drafts');
     if (checkDrafts && checkDrafts.count === 0) {

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
+    "@slack/web-api": "^7.18.0",
     "axios": "^1.7.2",
     "bcryptjs": "^2.4.3",
     "cheerio": "^1.0.0-rc.12",
