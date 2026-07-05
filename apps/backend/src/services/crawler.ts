@@ -69,7 +69,7 @@ function isParkingOrSalePage(html: string, title: string): boolean {
 }
 
 // Check ads.txt page
-async function checkAdsTxt(baseUrl: string): Promise<'present' | 'not present'> {
+export async function checkAdsTxt(baseUrl: string): Promise<'present' | 'not present'> {
   try {
     const adsTxtUrl = new URL('/ads.txt', baseUrl).toString();
     const response = await axios.get(adsTxtUrl, {

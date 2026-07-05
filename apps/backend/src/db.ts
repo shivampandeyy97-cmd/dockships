@@ -231,6 +231,28 @@ export async function initializeSchema(): Promise<void> {
       );
     `);
 
+    // Sellers table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_sellers (
+        id TEXT PRIMARY KEY,
+        company_domain TEXT NOT NULL,
+        seller_id TEXT,
+        name TEXT,
+        seller_type TEXT,
+        domain TEXT NOT NULL,
+        is_deleted INTEGER DEFAULT 0,
+        domain_status TEXT DEFAULT 'pending',
+        ads_txt_status TEXT DEFAULT 'pending',
+        crawled_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(company_domain, domain)
+      );
+    `);
+
+    await runQuery(`
+      CREATE INDEX IF NOT EXISTS idx_dockships_sellers_company_domain ON dockships_sellers(company_domain);
+    `);
+
     await runMigrations();
     await seedDefaultData();
     console.log(`Database tables successfully initialized (${isTurso ? 'Turso' : 'local SQLite'}).`);
@@ -275,6 +297,28 @@ async function runMigrations() {
         webhook_url TEXT,
         updated_at TEXT DEFAULT (datetime('now'))
       );
+    `);
+  } catch (e) {}
+
+  try {
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_sellers (
+        id TEXT PRIMARY KEY,
+        company_domain TEXT NOT NULL,
+        seller_id TEXT,
+        name TEXT,
+        seller_type TEXT,
+        domain TEXT NOT NULL,
+        is_deleted INTEGER DEFAULT 0,
+        domain_status TEXT DEFAULT 'pending',
+        ads_txt_status TEXT DEFAULT 'pending',
+        crawled_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(company_domain, domain)
+      );
+    `);
+    await runQuery(`
+      CREATE INDEX IF NOT EXISTS idx_dockships_sellers_company_domain ON dockships_sellers(company_domain);
     `);
   } catch (e) {}
 }

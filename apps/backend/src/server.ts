@@ -4,8 +4,9 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import path from 'path';
+import axios from 'axios';
 import { initializeSchema, runQuery, getRow, allRows } from './db';
-import { crawlWebsite } from './services/crawler';
+import { crawlWebsite, checkAdsTxt } from './services/crawler';
 import { sendOutreachEmail } from './services/email';
 import { sendSlackMessage, sendSlackAlert, getSlackSettings, initSlackClient, handleSlackCommand } from './services/slack';
 import { dockshipsAgent } from './services/agent';
@@ -1420,6 +1421,360 @@ app.get('/api/agent/stats', async (req, res) => {
     return res.json(stats);
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to gather agent stats.' });
+  }
+});
+
+// ===== SELLERS.JSON CRAWLER ENDPOINTS AND HELPERS =====
+
+const activeSellersCrawlers: Record<string, boolean> = {};
+
+async function checkSellerDomain(domain: string): Promise<{ domainStatus: 'pass' | 'failed', adsTxtStatus: 'present' | 'not present' }> {
+  const cleanDomain = domain.trim().toLowerCase();
+  let formattedUrl = cleanDomain;
+  if (!/^https?:\/\//i.test(formattedUrl)) {
+    formattedUrl = 'https://' + formattedUrl;
+  }
+
+  let domainStatus: 'pass' | 'failed' = 'failed';
+  let adsTxtStatus: 'present' | 'not present' = 'not present';
+
+  const userAgentString = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  try {
+    const response = await axios.get(formattedUrl, {
+      headers: { 'User-Agent': userAgentString },
+      timeout: 5000,
+      validateStatus: (status) => status >= 200 && status < 400,
+      maxRedirects: 3
+    });
+    domainStatus = 'pass';
+    const resolvedUrl = response.request?.res?.responseUrl || formattedUrl;
+    adsTxtStatus = await checkAdsTxt(resolvedUrl);
+  } catch (err: any) {
+    if (formattedUrl.startsWith('https://')) {
+      const httpUrl = formattedUrl.replace('https://', 'http://');
+      try {
+        const response = await axios.get(httpUrl, {
+          headers: { 'User-Agent': userAgentString },
+          timeout: 5000,
+          validateStatus: (status) => status >= 200 && status < 400,
+          maxRedirects: 3
+        });
+        domainStatus = 'pass';
+        const resolvedUrl = response.request?.res?.responseUrl || httpUrl;
+        adsTxtStatus = await checkAdsTxt(resolvedUrl);
+      } catch (httpErr) {
+        domainStatus = 'failed';
+      }
+    } else {
+      domainStatus = 'failed';
+    }
+  }
+
+  return { domainStatus, adsTxtStatus };
+}
+
+async function crawlSellersBackground(companyDomain: string) {
+  if (activeSellersCrawlers[companyDomain] === true) return;
+  activeSellersCrawlers[companyDomain] = true;
+
+  console.log(`[Sellers Crawl] Starting background crawl for ${companyDomain}`);
+
+  try {
+    while (activeSellersCrawlers[companyDomain] === true) {
+      const pendingSellers = await allRows<{ id: string, domain: string }>(
+        "SELECT id, domain FROM dockships_sellers WHERE company_domain = ? AND domain_status = 'pending' LIMIT 10",
+        [companyDomain]
+      );
+
+      if (pendingSellers.length === 0) {
+        console.log(`[Sellers Crawl] No more pending sellers for ${companyDomain}`);
+        break;
+      }
+
+      await Promise.all(pendingSellers.map(async (seller) => {
+        if (activeSellersCrawlers[companyDomain] !== true) return;
+
+        const cleanDomain = seller.domain ? seller.domain.trim() : '';
+        if (!cleanDomain || cleanDomain === 'none') {
+          await runQuery(
+            "UPDATE dockships_sellers SET domain_status = 'failed', ads_txt_status = 'not present', crawled_at = datetime('now') WHERE id = ?",
+            [seller.id]
+          );
+          return;
+        }
+
+        try {
+          const res = await checkSellerDomain(cleanDomain);
+          await runQuery(
+            "UPDATE dockships_sellers SET domain_status = ?, ads_txt_status = ?, crawled_at = datetime('now') WHERE id = ?",
+            [res.domainStatus, res.adsTxtStatus, seller.id]
+          );
+        } catch (err) {
+          await runQuery(
+            "UPDATE dockships_sellers SET domain_status = 'failed', ads_txt_status = 'not present', crawled_at = datetime('now') WHERE id = ?",
+            [seller.id]
+          );
+        }
+      }));
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  } catch (err) {
+    console.error(`[Sellers Crawl] Fatal error during sellers crawl for ${companyDomain}:`, err);
+  } finally {
+    delete activeSellersCrawlers[companyDomain];
+    console.log(`[Sellers Crawl] Stopped background crawl for ${companyDomain}`);
+  }
+}
+
+// Fetch sellers.json and parse it
+app.post('/api/sellers/fetch', async (req, res) => {
+  const { companyDomain } = req.body;
+  if (!companyDomain) {
+    return res.status(400).json({ error: 'Company website / domain is required.' });
+  }
+
+  let domain = companyDomain.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+  if (!domain.includes('.')) {
+    domain = domain + '.com';
+  }
+
+  const userAgentString = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  try {
+    let sellersUrl = `https://${domain}/sellers.json`;
+    let responseData: any = null;
+
+    try {
+      const response = await axios.get(sellersUrl, {
+        headers: { 'User-Agent': userAgentString },
+        timeout: 8000,
+        maxRedirects: 5
+      });
+      responseData = response.data;
+    } catch (err) {
+      const httpUrl = `http://${domain}/sellers.json`;
+      try {
+        const response = await axios.get(httpUrl, {
+          headers: { 'User-Agent': userAgentString },
+          timeout: 8000,
+          maxRedirects: 5
+        });
+        responseData = response.data;
+      } catch (httpErr: any) {
+        return res.status(400).json({
+          error: `Failed to fetch sellers.json from either https or http for domain: ${domain}. Error: ${httpErr.message}`
+        });
+      }
+    }
+
+    let json: any = responseData;
+    if (typeof responseData === 'string') {
+      try {
+        json = JSON.parse(responseData);
+      } catch (parseErr) {
+        return res.status(400).json({ error: 'Failed to parse sellers.json. Invalid JSON content.' });
+      }
+    }
+
+    if (!json || !Array.isArray(json.sellers)) {
+      return res.status(400).json({ error: 'Invalid sellers.json format. Missing "sellers" array.' });
+    }
+
+    const rawSellers = json.sellers;
+    const sellersToInsert = rawSellers.filter((s: any) => {
+      const hasDomain = s.domain && typeof s.domain === 'string' && s.domain.trim().length > 0;
+      const isDeleted = s.is_deleted === true || s.is_deleted === 1 || s.is_deleted === 'true';
+      return hasDomain && !isDeleted;
+    });
+
+    if (sellersToInsert.length === 0) {
+      return res.json({ success: true, count: 0, message: 'No active sellers found with valid domains.' });
+    }
+
+    const chunkSize = 100;
+    for (let i = 0; i < sellersToInsert.length; i += chunkSize) {
+      const chunk = sellersToInsert.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, 0)').join(', ');
+      const query = `
+        INSERT INTO dockships_sellers (id, company_domain, seller_id, name, seller_type, domain, is_deleted)
+        VALUES ${placeholders}
+        ON CONFLICT(company_domain, domain) DO UPDATE SET
+          seller_id = excluded.seller_id,
+          name = excluded.name,
+          seller_type = excluded.seller_type,
+          is_deleted = excluded.is_deleted
+      `;
+
+      const params: any[] = [];
+      chunk.forEach((s: any) => {
+        const id = crypto.randomUUID();
+        const sellerId = String(s.seller_id || '');
+        const name = String(s.name || '');
+        const sellerType = String(s.seller_type || '');
+        const sellerDomain = String(s.domain || '').trim().toLowerCase();
+
+        params.push(id, domain, sellerId, name, sellerType, sellerDomain);
+      });
+
+      await runQuery(query, params);
+    }
+
+    crawlSellersBackground(domain);
+
+    return res.json({
+      success: true,
+      count: sellersToInsert.length,
+      companyDomain: domain,
+      message: `Successfully imported ${sellersToInsert.length} active sellers. Crawler starting in background.`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Internal error fetching sellers.json' });
+  }
+});
+
+// GET sellers for a company with stats, pagination, search, and status filters
+app.get('/api/sellers', async (req, res) => {
+  const { companyDomain, page = '1', limit = '50', search = '', domainStatus = 'all', adsTxtStatus = 'all' } = req.query;
+
+  if (!companyDomain) {
+    return res.status(400).json({ error: 'companyDomain query parameter is required.' });
+  }
+
+  const domain = String(companyDomain).trim().toLowerCase();
+  const pageNum = parseInt(String(page), 10) || 1;
+  const limitNum = parseInt(String(limit), 10) || 50;
+  const offset = (pageNum - 1) * limitNum;
+
+  try {
+    const stats = await getRow<any>(
+      `SELECT 
+         COUNT(*) as total,
+         SUM(CASE WHEN domain_status = 'pending' THEN 1 ELSE 0 END) as pending,
+         SUM(CASE WHEN domain_status = 'pass' THEN 1 ELSE 0 END) as live,
+         SUM(CASE WHEN domain_status = 'failed' THEN 1 ELSE 0 END) as failed,
+         SUM(CASE WHEN ads_txt_status = 'present' THEN 1 ELSE 0 END) as adsTxtPresent,
+         SUM(CASE WHEN ads_txt_status = 'not present' THEN 1 ELSE 0 END) as adsTxtNotPresent
+       FROM dockships_sellers
+       WHERE company_domain = ?`,
+      [domain]
+    );
+
+    const statsObj = {
+      total: stats?.total || 0,
+      pending: stats?.pending || 0,
+      live: stats?.live || 0,
+      failed: stats?.failed || 0,
+      adsTxtPresent: stats?.adsTxtPresent || 0,
+      adsTxtNotPresent: stats?.adsTxtNotPresent || 0,
+      crawling: !!activeSellersCrawlers[domain]
+    };
+
+    let filterQuery = 'WHERE company_domain = ?';
+    const params: any[] = [domain];
+
+    if (search) {
+      filterQuery += ' AND (domain LIKE ? OR name LIKE ? OR seller_id LIKE ?)';
+      const searchParam = `%${String(search).trim()}%`;
+      params.push(searchParam, searchParam, searchParam);
+    }
+
+    if (domainStatus !== 'all') {
+      filterQuery += ' AND domain_status = ?';
+      params.push(domainStatus);
+    }
+
+    if (adsTxtStatus !== 'all') {
+      filterQuery += ' AND ads_txt_status = ?';
+      params.push(adsTxtStatus);
+    }
+
+    const totalMatchingRow = await getRow<{ count: number }>(
+      `SELECT COUNT(*) as count FROM dockships_sellers ${filterQuery}`,
+      params
+    );
+    const totalMatching = totalMatchingRow?.count || 0;
+
+    const listParams = [...params, limitNum, offset];
+    const sellers = await allRows<any>(
+      `SELECT * FROM dockships_sellers 
+       ${filterQuery} 
+       ORDER BY domain_status ASC, domain ASC 
+       LIMIT ? OFFSET ?`,
+      listParams
+    );
+
+    return res.json({
+      sellers,
+      stats: statsObj,
+      pagination: {
+        total: totalMatching,
+        page: pageNum,
+        limit: limitNum,
+        pages: Math.ceil(totalMatching / limitNum)
+      }
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch sellers.' });
+  }
+});
+
+// START/RESUME crawling for a company
+app.post('/api/sellers/crawl', async (req, res) => {
+  const { companyDomain } = req.body;
+  if (!companyDomain) {
+    return res.status(400).json({ error: 'companyDomain is required.' });
+  }
+  const domain = String(companyDomain).trim().toLowerCase();
+  
+  crawlSellersBackground(domain);
+  return res.json({ success: true, message: 'Crawl process started/resumed.' });
+});
+
+// STOP crawling for a company
+app.post('/api/sellers/crawl/stop', async (req, res) => {
+  const { companyDomain } = req.body;
+  if (!companyDomain) {
+    return res.status(400).json({ error: 'companyDomain is required.' });
+  }
+  const domain = String(companyDomain).trim().toLowerCase();
+  
+  if (activeSellersCrawlers[domain] === true) {
+    activeSellersCrawlers[domain] = false;
+  }
+  return res.json({ success: true, message: 'Crawl process stop requested.' });
+});
+
+// CLEAR/DELETE sellers for a company
+app.post('/api/sellers/clear', async (req, res) => {
+  const { companyDomain } = req.body;
+  if (!companyDomain) {
+    return res.status(400).json({ error: 'companyDomain is required.' });
+  }
+  const domain = String(companyDomain).trim().toLowerCase();
+  
+  if (activeSellersCrawlers[domain] === true) {
+    delete activeSellersCrawlers[domain];
+  }
+
+  try {
+    await runQuery('DELETE FROM dockships_sellers WHERE company_domain = ?', [domain]);
+    return res.json({ success: true, message: `Successfully cleared sellers data for ${domain}.` });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET all companies that have crawled sellers
+app.get('/api/sellers/companies', async (req, res) => {
+  try {
+    const rows = await allRows<{ company_domain: string }>(
+      'SELECT DISTINCT company_domain FROM dockships_sellers ORDER BY company_domain ASC'
+    );
+    return res.json(rows.map(r => r.company_domain));
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
   }
 });
 

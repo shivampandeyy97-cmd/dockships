@@ -73,6 +73,37 @@ interface SlackSettings {
   configured: boolean;
 }
 
+interface Seller {
+  id: string;
+  company_domain: string;
+  seller_id?: string;
+  name?: string;
+  seller_type?: string;
+  domain: string;
+  is_deleted?: number;
+  domain_status?: string;
+  ads_txt_status?: string;
+  crawled_at?: string;
+  created_at: string;
+}
+
+interface SellersStats {
+  total: number;
+  pending: number;
+  live: number;
+  failed: number;
+  adsTxtPresent: number;
+  adsTxtNotPresent: number;
+  crawling: boolean;
+}
+
+interface SellersPagination {
+  total: number;
+  page: number;
+  limit: number;
+  pages: number;
+}
+
 interface Draft {
   id: string;
   subject: string;
@@ -139,7 +170,34 @@ function parseCSV(text: string) {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'templates' | 'agent'>('leads');
+  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'templates' | 'agent' | 'sellers'>('leads');
+
+  // Sellers states
+  const [crawledCompanies, setCrawledCompanies] = useState<string[]>([]);
+  const [selectedCompany, setSelectedCompany] = useState<string>('');
+  const [companyInput, setCompanyInput] = useState<string>('');
+  const [fetchingSellers, setFetchingSellers] = useState<boolean>(false);
+  const [loadingSellers, setLoadingSellers] = useState<boolean>(false);
+  const [sellers, setSellers] = useState<Seller[]>([]);
+  const [sellersStats, setSellersStats] = useState<SellersStats>({
+    total: 0,
+    pending: 0,
+    live: 0,
+    failed: 0,
+    adsTxtPresent: 0,
+    adsTxtNotPresent: 0,
+    crawling: false
+  });
+  const [sellersPagination, setSellersPagination] = useState<SellersPagination>({
+    total: 0,
+    page: 1,
+    limit: 50,
+    pages: 1
+  });
+  const [sellersSearch, setSellersSearch] = useState<string>('');
+  const [sellersDomainFilter, setSellersDomainFilter] = useState<string>('all');
+  const [sellersAdsTxtFilter, setSellersAdsTxtFilter] = useState<string>('all');
+  const [sellersPage, setSellersPage] = useState<number>(1);
   
   // Theme state
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -245,6 +303,307 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     localStorage.setItem('dockships_theme', theme);
   }, [theme]);
 
+
+  // Targets CSV Export
+  const handleExportLeadsCSV = () => {
+    if (leads.length === 0) {
+      alert("No leads available to export.");
+      return;
+    }
+
+    const filtered = leads.filter(lead => {
+      if (domainFilter !== 'all' && lead.domain_status !== domainFilter) return false;
+      if (adsTxtFilter !== 'all' && lead.ads_txt_status !== adsTxtFilter) return false;
+      if (adsFilter !== 'all') {
+        const hasAds = lead.ads_detected && lead.ads_detected.toLowerCase().startsWith('yes');
+        if (adsFilter === 'yes' && !hasAds) return false;
+        if (adsFilter === 'no' && hasAds) return false;
+      }
+      if (contactFilter !== 'all' && lead.contact_form_status !== contactFilter) return false;
+      if (linkedinFilter !== 'all' && lead.linkedin_status !== linkedinFilter) return false;
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      alert("No leads match current active filters.");
+      return;
+    }
+
+    const headers = [
+      'Website Domain',
+      'POC Name',
+      'Domain Status',
+      'ads.txt Status',
+      'Ads Detected',
+      'Contact Form Status',
+      'Best Email',
+      'Fetched Emails',
+      'LinkedIn Status',
+      'Outreach Status',
+      'Crawled At',
+      'Created At'
+    ];
+
+    const rows = filtered.map(lead => [
+      lead.website,
+      lead.poc_name || '',
+      lead.domain_status || 'pending',
+      lead.ads_txt_status || 'pending',
+      lead.ads_detected || 'pending',
+      lead.contact_form_status || 'pending',
+      lead.best_email || '',
+      (lead.fetched_emails || []).join('; '),
+      lead.linkedin_status || 'pending',
+      lead.status || 'pending',
+      lead.crawled_at || '',
+      lead.created_at || ''
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(val => `"${val.replace(/"/g, '""')}"`).join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `dockships_leads_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Fetch company list
+  const fetchCrawledCompanies = async () => {
+    try {
+      const response = await fetch(`${API_URL}/api/sellers/companies`);
+      if (response.ok) {
+        const data = await response.json();
+        setCrawledCompanies(data);
+      }
+    } catch (e) {
+      console.error('Error loading crawled companies:', e);
+    }
+  };
+
+  // Fetch sellers lists & stats
+  const fetchSellers = async (company: string, pageNum: number, searchVal?: string, domFilter?: string, adsTxtFilt?: string) => {
+    if (!company) return;
+    setLoadingSellers(true);
+    try {
+      const queryParams = new URLSearchParams({
+        companyDomain: company,
+        page: String(pageNum),
+        limit: '50',
+        search: searchVal !== undefined ? searchVal : sellersSearch,
+        domainStatus: domFilter !== undefined ? domFilter : sellersDomainFilter,
+        adsTxtStatus: adsTxtFilt !== undefined ? adsTxtFilt : sellersAdsTxtFilter
+      });
+
+      const response = await fetch(`${API_URL}/api/sellers?${queryParams}`);
+      if (response.ok) {
+        const data = await response.json();
+        setSellers(data.sellers);
+        setSellersStats(data.stats);
+        setSellersPagination(data.pagination);
+      }
+    } catch (e) {
+      console.error('Error loading sellers:', e);
+    } finally {
+      setLoadingSellers(false);
+    }
+  };
+
+  // Fetch & crawl sellers.json
+  const handleFetchSellersJson = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!companyInput.trim()) return;
+    setFetchingSellers(true);
+    try {
+      const response = await fetch(`${API_URL}/api/sellers/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyDomain: companyInput })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to fetch sellers.json');
+      }
+
+      alert(data.message);
+      setSelectedCompany(data.companyDomain);
+      setCompanyInput('');
+      setSellersPage(1);
+      setSellersSearch('');
+      setSellersDomainFilter('all');
+      setSellersAdsTxtFilter('all');
+      fetchCrawledCompanies();
+      fetchSellers(data.companyDomain, 1, '', 'all', 'all');
+    } catch (err: any) {
+      alert(err.message || 'Error occurred fetching sellers.json');
+    } finally {
+      setFetchingSellers(false);
+    }
+  };
+
+  // Start / Resume crawl
+  const handleCrawlSellers = async () => {
+    if (!selectedCompany) return;
+    try {
+      const response = await fetch(`${API_URL}/api/sellers/crawl`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyDomain: selectedCompany })
+      });
+      if (response.ok) {
+        setSellersStats(prev => ({ ...prev, crawling: true }));
+        fetchSellers(selectedCompany, sellersPage);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Stop crawl
+  const handleStopCrawlSellers = async () => {
+    if (!selectedCompany) return;
+    try {
+      const response = await fetch(`${API_URL}/api/sellers/crawl/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyDomain: selectedCompany })
+      });
+      if (response.ok) {
+        setSellersStats(prev => ({ ...prev, crawling: false }));
+        fetchSellers(selectedCompany, sellersPage);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Clear sellers
+  const handleClearSellers = async () => {
+    if (!selectedCompany) return;
+    if (!window.confirm(`Are you sure you want to clear all sellers data for ${selectedCompany}?`)) return;
+    try {
+      const response = await fetch(`${API_URL}/api/sellers/clear`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyDomain: selectedCompany })
+      });
+      if (response.ok) {
+        setSelectedCompany('');
+        setSellers([]);
+        setSellersStats({
+          total: 0,
+          pending: 0,
+          live: 0,
+          failed: 0,
+          adsTxtPresent: 0,
+          adsTxtNotPresent: 0,
+          crawling: false
+        });
+        setSellersPagination({ total: 0, page: 1, limit: 50, pages: 1 });
+        fetchCrawledCompanies();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Export Sellers to CSV
+  const handleExportSellersCSV = () => {
+    if (sellers.length === 0 || !selectedCompany) {
+      alert("No sellers data available to export.");
+      return;
+    }
+
+    const headers = [
+      'Seller ID',
+      'Legal Name',
+      'Seller Type',
+      'Business Domain',
+      'Is Live',
+      'ads.txt Status',
+      'Crawled At'
+    ];
+
+    setLoadingSellers(true);
+    const queryParams = new URLSearchParams({
+      companyDomain: selectedCompany,
+      page: '1',
+      limit: '100000',
+      search: sellersSearch,
+      domainStatus: sellersDomainFilter,
+      adsTxtStatus: sellersAdsTxtFilter
+    });
+
+    fetch(`${API_URL}/api/sellers?${queryParams}`)
+      .then(res => {
+        if (!res.ok) throw new Error("Failed to export all records.");
+        return res.json();
+      })
+      .then(data => {
+        const rows = data.sellers.map((s: any) => [
+          s.seller_id || '',
+          s.name || '',
+          s.seller_type || '',
+          s.domain,
+          s.domain_status || 'pending',
+          s.ads_txt_status || 'pending',
+          s.crawled_at || ''
+        ]);
+
+        const csvContent = [
+          headers.join(','),
+          ...rows.map((row: any) => row.map((val: any) => `"${val.replace(/"/g, '""')}"`).join(','))
+        ].join('\n');
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.setAttribute('href', url);
+        link.setAttribute('download', `${selectedCompany}_sellers_export_${new Date().toISOString().split('T')[0]}.csv`);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      })
+      .catch(err => {
+        alert(err.message || "Failed to export CSV.");
+      })
+      .finally(() => {
+        setLoadingSellers(false);
+      });
+  };
+
+  // Fetch company lists initially
+  useEffect(() => {
+    fetchCrawledCompanies();
+  }, []);
+
+  // Poll active crawls for sellers
+  useEffect(() => {
+    let intervalId: any = null;
+    if (sellersStats.crawling && selectedCompany) {
+      intervalId = setInterval(() => {
+        fetchSellers(selectedCompany, sellersPage);
+      }, 3000);
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [sellersStats.crawling, selectedCompany, sellersPage]);
+
+  // Load sellers when filters or pagination changes
+  useEffect(() => {
+    if (selectedCompany) {
+      fetchSellers(selectedCompany, sellersPage);
+    }
+  }, [selectedCompany, sellersPage, sellersDomainFilter, sellersAdsTxtFilter]);
 
   const fetchLeads = async () => {
     try {
@@ -942,6 +1301,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
               <span style={{ position: 'absolute', top: '-4px', right: '-4px', width: '8px', height: '8px', borderRadius: '50%', background: '#22c55e', border: '2px solid var(--bg-surface)' }} />
             )}
           </button>
+          <button 
+            className={`btn ${activeTab === 'sellers' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setActiveTab('sellers')}
+            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+          >
+            🔍 Sellers.json Crawler
+          </button>
         </nav>
 
         <div className="user-profile">
@@ -1095,6 +1461,15 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                   )}
                   <button className="btn btn-secondary" onClick={fetchLeads} disabled={loadingLeads} style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}>
                     Refresh
+                  </button>
+                  <button 
+                    className="btn btn-secondary" 
+                    onClick={handleExportLeadsCSV} 
+                    disabled={leads.length === 0} 
+                    style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}
+                    title="Export all/filtered target leads to CSV"
+                  >
+                    📥 Export CSV
                   </button>
                 </div>
               </div>
@@ -2276,6 +2651,359 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             </div>
           </div>
         </main>
+      )}
+
+      {/* Sellers.json Crawler Tab */}
+      {activeTab === 'sellers' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem', width: '100%' }} className="animate-fade">
+          {/* Top Bar for Fetch & Select Company */}
+          <div className="glass-panel" style={{ padding: '1.5rem 2rem' }}>
+            <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              
+              {/* Fetch Form */}
+              <form onSubmit={handleFetchSellersJson} style={{ flex: '1 1 350px' }}>
+                <h3 className="card-title" style={{ fontSize: '1.05rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.75rem' }}>
+                  Fetch New Company Sellers.json
+                </h3>
+                <div style={{ display: 'flex', gap: '0.75rem' }}>
+                  <input
+                    type="text"
+                    className="form-control"
+                    placeholder="Enter company website (e.g. pubmatic.com)"
+                    value={companyInput}
+                    onChange={(e) => setCompanyInput(e.target.value)}
+                    disabled={fetchingSellers}
+                    required
+                  />
+                  <button 
+                    type="submit" 
+                    className="btn btn-primary"
+                    disabled={fetchingSellers || !companyInput.trim()}
+                    style={{ whiteSpace: 'nowrap' }}
+                  >
+                    {fetchingSellers ? 'Fetching...' : '🔍 Fetch Sellers'}
+                  </button>
+                </div>
+              </form>
+
+              {/* Company Selector */}
+              {crawledCompanies.length > 0 && (
+                <div style={{ flex: '1 1 250px' }}>
+                  <h3 className="card-title" style={{ fontSize: '1.05rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '0.75rem' }}>
+                    Select Crawled Company
+                  </h3>
+                  <select
+                    className="form-control"
+                    value={selectedCompany}
+                    onChange={(e) => {
+                      setSelectedCompany(e.target.value);
+                      setSellersPage(1);
+                      setSellersSearch('');
+                      setSellersDomainFilter('all');
+                      setSellersAdsTxtFilter('all');
+                    }}
+                    style={{ height: '46px' }}
+                  >
+                    <option value="">-- Choose a Company --</option>
+                    {crawledCompanies.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+            </div>
+          </div>
+
+          {selectedCompany ? (
+            <main style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', minWidth: 0 }}>
+              
+              {/* Stats Card Section */}
+              <div className="stat-card-container">
+                <div className="glass-panel stat-card" style={{ position: 'relative' }}>
+                  <div className="stat-value">{sellersStats.total}</div>
+                  <div className="stat-label">Total Sellers</div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-value" style={{ color: 'var(--success)' }}>
+                    {sellersStats.live}
+                  </div>
+                  <div className="stat-label">Live Sites</div>
+                </div>
+                <div className="glass-panel stat-card">
+                  <div className="stat-value" style={{ color: 'var(--primary)' }}>
+                    {sellersStats.adsTxtPresent}
+                  </div>
+                  <div className="stat-label">ads.txt Present</div>
+                </div>
+              </div>
+
+              {/* Progress and Crawler Status Controls */}
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1rem' }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-bright)' }}>
+                      Crawler Progress for <span style={{ color: 'var(--primary)' }}>{selectedCompany}</span>
+                    </h3>
+                    <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                      Crawled: {sellersStats.total - sellersStats.pending} / {sellersStats.total} ({sellersStats.total > 0 ? Math.round(((sellersStats.total - sellersStats.pending) / sellersStats.total) * 100) : 0}%)
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.75rem' }}>
+                    {sellersStats.crawling ? (
+                      <button className="btn btn-secondary" onClick={handleStopCrawlSellers} style={{ borderColor: 'var(--warning)', color: 'var(--warning)' }}>
+                        ⏸️ Pause Crawling
+                      </button>
+                    ) : (
+                      <button className="btn btn-primary" onClick={handleCrawlSellers} disabled={sellersStats.pending === 0}>
+                        ▶️ {sellersStats.pending === sellersStats.total ? 'Start Crawling' : 'Resume Crawling'}
+                      </button>
+                    )}
+                    <button className="btn btn-danger" onClick={handleClearSellers} style={{ background: '#ef4444', borderColor: '#ef4444' }}>
+                      🗑️ Delete Data
+                    </button>
+                  </div>
+                </div>
+
+                {/* Progress Bar */}
+                <div style={{ height: '10px', background: 'rgba(255, 255, 255, 0.05)', borderRadius: '6px', overflow: 'hidden', width: '100%' }}>
+                  <div 
+                    className="progress-bar-fill"
+                    style={{
+                      height: '100%',
+                      width: `${sellersStats.total > 0 ? ((sellersStats.total - sellersStats.pending) / sellersStats.total) * 100 : 0}%`,
+                      background: 'linear-gradient(90deg, var(--primary) 0%, var(--success) 100%)',
+                      transition: 'width 0.5s ease',
+                      boxShadow: '0 0 10px var(--primary-glow)'
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Sellers List */}
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                
+                {/* Header Actions */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
+                  <h2 className="card-title" style={{ margin: 0 }}>Sellers Directory</h2>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    <button className="btn btn-secondary" onClick={() => fetchSellers(selectedCompany, sellersPage)} disabled={loadingSellers} style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}>
+                      Refresh
+                    </button>
+                    <button className="btn btn-secondary" onClick={handleExportSellersCSV} disabled={sellers.length === 0} style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}>
+                      📥 Export CSV
+                    </button>
+                  </div>
+                </div>
+
+                {/* Filters */}
+                <div style={{
+                  display: 'flex',
+                  gap: '1rem',
+                  flexWrap: 'wrap',
+                  padding: '1rem',
+                  background: 'rgba(255, 255, 255, 0.02)',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(255, 255, 255, 0.05)',
+                  marginBottom: '1.5rem',
+                  alignItems: 'center'
+                }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-bright)' }}>Filters:</span>
+
+                  {/* Search Input */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: '1 1 200px' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Search Domain or Name</label>
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                      <input 
+                        type="text" 
+                        placeholder="Search..."
+                        className="form-control" 
+                        value={sellersSearch} 
+                        onChange={(e) => setSellersSearch(e.target.value)}
+                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', height: '30px' }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            setSellersPage(1);
+                            fetchSellers(selectedCompany, 1);
+                          }
+                        }}
+                      />
+                      <button 
+                        className="btn btn-secondary"
+                        onClick={() => {
+                          setSellersPage(1);
+                          fetchSellers(selectedCompany, 1);
+                        }}
+                        style={{ padding: '0.25rem 0.75rem', fontSize: '0.8rem', height: '30px' }}
+                      >
+                        Find
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Domain Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Is Live (Domain)</label>
+                    <select 
+                      value={sellersDomainFilter} 
+                      onChange={(e) => {
+                        setSellersDomainFilter(e.target.value);
+                        setSellersPage(1);
+                      }}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '130px', height: '30px' }}
+                    >
+                      <option value="all">All Domains</option>
+                      <option value="pass">Live Only</option>
+                      <option value="failed">Failed Only</option>
+                      <option value="pending">Pending Only</option>
+                    </select>
+                  </div>
+
+                  {/* ads.txt Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ads.txt Status</label>
+                    <select 
+                      value={sellersAdsTxtFilter} 
+                      onChange={(e) => {
+                        setSellersAdsTxtFilter(e.target.value);
+                        setSellersPage(1);
+                      }}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '140px', height: '30px' }}
+                    >
+                      <option value="all">All ads.txt</option>
+                      <option value="present">Present</option>
+                      <option value="not present">Not Present</option>
+                      <option value="pending">Pending</option>
+                    </select>
+                  </div>
+
+                  {/* Clear Button */}
+                  {(sellersSearch !== '' || sellersDomainFilter !== 'all' || sellersAdsTxtFilter !== 'all') && (
+                    <button 
+                      onClick={() => {
+                        setSellersSearch('');
+                        setSellersDomainFilter('all');
+                        setSellersAdsTxtFilter('all');
+                        setSellersPage(1);
+                        fetchSellers(selectedCompany, 1, '', 'all', 'all');
+                      }}
+                      className="btn btn-secondary"
+                      style={{ padding: '0.25rem 0.75rem', fontSize: '0.8rem', height: '30px', alignSelf: 'flex-end' }}
+                    >
+                      Clear Filters
+                    </button>
+                  )}
+                </div>
+
+                {/* Table View */}
+                {loadingSellers && sellers.length === 0 ? (
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '250px', color: 'var(--text-muted)' }}>
+                    Loading directory database...
+                  </div>
+                ) : sellers.length === 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '200px', color: 'var(--text-muted)' }}>
+                    <span>🔍</span>
+                    <p style={{ marginTop: '0.5rem' }}>No sellers match the current filters.</p>
+                  </div>
+                ) : (
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Seller ID</th>
+                          <th>Legal Name</th>
+                          <th>Seller Type</th>
+                          <th>Business Domain</th>
+                          <th>Is Live (Domain)</th>
+                          <th>ads.txt Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sellers.map((s) => (
+                          <tr key={s.id}>
+                            <td style={{ fontWeight: 600, color: 'var(--text-bright)' }}>{s.seller_id}</td>
+                            <td>{s.name || <span style={{ fontStyle: 'italic', opacity: 0.5 }}>Confidential</span>}</td>
+                            <td>
+                              <span style={{ fontSize: '0.75rem', fontWeight: 600, background: 'rgba(255,255,255,0.04)', padding: '0.15rem 0.4rem', borderRadius: '4px', border: '1px solid var(--card-border)' }}>
+                                {s.seller_type}
+                              </span>
+                            </td>
+                            <td>
+                              <a 
+                                href={`https://${s.domain}`} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="lead-link"
+                              >
+                                {s.domain} <span style={{ fontSize: '0.75rem', opacity: 0.5 }}>↗</span>
+                              </a>
+                            </td>
+                            <td>
+                              {s.domain_status === 'pass' ? (
+                                <span className="badge badge-success">Live</span>
+                              ) : s.domain_status === 'failed' ? (
+                                <span className="badge badge-danger">Offline / Error</span>
+                              ) : (
+                                <span className="badge badge-secondary">Pending</span>
+                              )}
+                            </td>
+                            <td>
+                              {s.ads_txt_status === 'present' ? (
+                                <span className="badge badge-success">Present</span>
+                              ) : s.ads_txt_status === 'not present' ? (
+                                <span className="badge badge-secondary">Not Present</span>
+                              ) : (
+                                <span className="badge badge-secondary">Pending</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Pagination Controls */}
+                {sellersPagination.pages > 1 && (
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '1rem', marginTop: '1.5rem' }}>
+                    <button 
+                      className="btn btn-secondary" 
+                      onClick={() => setSellersPage(p => Math.max(1, p - 1))}
+                      disabled={sellersPage === 1}
+                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                    >
+                      ◀ Previous
+                    </button>
+                    <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      Page <strong>{sellersPage}</strong> of <strong>{sellersPagination.pages}</strong> ({sellersPagination.total} total matching)
+                    </span>
+                    <button 
+                      className="btn btn-secondary" 
+                      onClick={() => setSellersPage(p => Math.min(sellersPagination.pages, p + 1))}
+                      disabled={sellersPage === sellersPagination.pages}
+                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem' }}
+                    >
+                      Next ▶
+                    </button>
+                  </div>
+                )}
+
+              </div>
+
+            </main>
+          ) : (
+            <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '300px', color: 'var(--text-muted)' }}>
+              <span style={{ fontSize: '3rem', marginBottom: '1.25rem' }}>📊</span>
+              <h3 style={{ margin: 0, fontWeight: 600, color: 'var(--text-bright)' }}>No Company Selected</h3>
+              <p style={{ marginTop: '0.35rem', fontSize: '0.85rem' }}>Enter a website URL above to fetch sellers, or choose a previously crawled company.</p>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Modal Outreach Composer */}
