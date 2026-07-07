@@ -26,7 +26,7 @@ interface SmtpSettings {
   sender_email: string;
   mailgun_api_key?: string;
   mailgun_domain?: string;
-  active_service?: 'smtp' | 'mailgun';
+  active_service?: 'smtp' | 'mailgun' | 'gmail';
 }
 
 /**
@@ -71,6 +71,37 @@ export async function sendOutreachEmail(
       'SELECT * FROM dockships_smtp_settings WHERE user_id = ?',
       [userId]
     );
+
+    // Subcase 2A: Saved Gmail Dispatcher
+    if (settings && settings.active_service === 'gmail' && settings.username && settings.password) {
+      console.log(`Using saved Gmail SMTP configuration for user: ${settings.username}`);
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: settings.username,
+          pass: settings.password
+        }
+      });
+      const fromAddress = settings.sender_name 
+        ? `"${settings.sender_name}" <${settings.username}>`
+        : settings.username;
+
+      const mailOptions = {
+        from: fromAddress,
+        to: options.to,
+        subject: options.subject,
+        text: options.body.replace(/<[^>]*>/g, ''),
+        html: options.body
+      };
+
+      const info = await transporter.sendMail(mailOptions);
+      console.log('Saved Gmail sent successfully:', info.messageId || info);
+
+      return {
+        success: true,
+        messageId: info.messageId || 'mock-id-success'
+      };
+    }
 
     // Resolve Mailgun Credentials (use saved settings, falling back to process.env defaults)
     const mailgunApiKey = settings?.mailgun_api_key || process.env.MAILGUN_API_KEY;

@@ -163,7 +163,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
                   onChange={() => setService('smtp')}
                   disabled={loading}
                 />
-                Autopilot (SMTP/Mailgun Settings)
+                Autopilot (Saved Settings)
               </label>
               <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                 <input

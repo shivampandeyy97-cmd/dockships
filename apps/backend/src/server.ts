@@ -230,8 +230,14 @@ app.post('/api/settings/smtp', async (req, res) => {
     mailgunApiKey, mailgunDomain, activeService 
   } = req.body;
 
-  if (!userId || !senderEmail) {
-    return res.status(400).json({ error: 'User ID and sender email are required.' });
+  const selectedService = activeService || 'smtp';
+  let finalSenderEmail = senderEmail;
+  if (selectedService === 'gmail' && !finalSenderEmail && username) {
+    finalSenderEmail = username;
+  }
+
+  if (!userId || !finalSenderEmail) {
+    return res.status(400).json({ error: 'User ID and sender email/gmail address are required.' });
   }
 
   try {
@@ -240,8 +246,6 @@ app.post('/api/settings/smtp', async (req, res) => {
       'SELECT password, mailgun_api_key FROM dockships_smtp_settings WHERE user_id = ?',
       [userId]
     );
-
-    const selectedService = activeService || 'smtp';
 
     let finalPassword = password;
     if (!finalPassword && existing) {
@@ -260,6 +264,10 @@ app.post('/api/settings/smtp', async (req, res) => {
     } else if (selectedService === 'mailgun') {
       if (!finalMailgunApiKey || !mailgunDomain) {
         return res.status(400).json({ error: 'Mailgun API Key and Domain are required.' });
+      }
+    } else if (selectedService === 'gmail') {
+      if (!username || !finalPassword) {
+        return res.status(400).json({ error: 'Gmail Account Email Address and App Password are required.' });
       }
     }
 
@@ -281,14 +289,14 @@ app.post('/api/settings/smtp', async (req, res) => {
          active_service=excluded.active_service`,
       [
         userId, 
-        host ? host.trim() : null, 
-        port ? parseInt(port, 10) : null, 
+        selectedService === 'gmail' ? null : (host ? host.trim() : null), 
+        selectedService === 'gmail' ? null : (port ? parseInt(port, 10) : null), 
         username ? username.trim() : null, 
         finalPassword || null, 
         senderName ? senderName.trim() : null, 
-        senderEmail.trim(),
-        finalMailgunApiKey ? finalMailgunApiKey.trim() : null,
-        mailgunDomain ? mailgunDomain.trim() : null,
+        finalSenderEmail.trim(),
+        selectedService === 'gmail' ? null : (finalMailgunApiKey ? finalMailgunApiKey.trim() : null),
+        selectedService === 'gmail' ? null : (mailgunDomain ? mailgunDomain.trim() : null),
         selectedService
       ]
     );

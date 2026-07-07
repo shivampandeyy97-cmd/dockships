@@ -228,7 +228,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
 
   // Settings states
-  const [activeService, setActiveService] = useState<'smtp' | 'mailgun'>('smtp');
+  const [activeService, setActiveService] = useState<'smtp' | 'mailgun' | 'gmail'>('smtp');
   const [smtpHost, setSmtpHost] = useState('');
   const [smtpPort, setSmtpPort] = useState('587');
   const [smtpUsername, setSmtpUsername] = useState('');
@@ -1212,14 +1212,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId: user.id,
-          host: smtpHost,
-          port: smtpPort ? parseInt(smtpPort, 10) : undefined,
+          host: activeService === 'gmail' ? undefined : smtpHost,
+          port: activeService === 'gmail' ? undefined : (smtpPort ? parseInt(smtpPort, 10) : undefined),
           username: smtpUsername,
           password: smtpPassword,
           senderName: smtpSenderName,
-          senderEmail: activeService === 'mailgun' ? 'contact@rollinhead.com' : smtpSenderEmail,
-          mailgunApiKey: mailgunApiKey || undefined,
-          mailgunDomain: mailgunDomain || undefined,
+          senderEmail: activeService === 'mailgun' 
+            ? 'contact@rollinhead.com' 
+            : (activeService === 'gmail' ? smtpUsername : smtpSenderEmail),
+          mailgunApiKey: activeService === 'gmail' ? undefined : (mailgunApiKey || undefined),
+          mailgunDomain: activeService === 'gmail' ? undefined : (mailgunDomain || undefined),
           activeService
         })
       });
@@ -2388,6 +2390,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                   />
                   Mailgun API
                 </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="active-service-type"
+                    checked={activeService === 'gmail'}
+                    onChange={() => setActiveService('gmail')}
+                    disabled={savingSettings}
+                  />
+                  Gmail (App Password)
+                </label>
               </div>
             </div>
 
@@ -2485,6 +2497,49 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
               </div>
             )}
 
+            {/* Conditionally Render Gmail Fields */}
+            {activeService === 'gmail' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginBottom: '1.5rem' }}>
+                <div className="settings-form-grid">
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label" htmlFor="gmail-address">Gmail Address</label>
+                    <input
+                      id="gmail-address"
+                      type="email"
+                      className="form-control"
+                      placeholder="e.g. yourname@gmail.com"
+                      value={smtpUsername}
+                      onChange={(e) => setSmtpUsername(e.target.value)}
+                      disabled={savingSettings}
+                      required={activeService === 'gmail'}
+                    />
+                  </div>
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label" htmlFor="gmail-app-password">Google App Password</label>
+                    <input
+                      id="gmail-app-password"
+                      type="password"
+                      className="form-control"
+                      placeholder="16-character App Password"
+                      value={smtpPassword}
+                      onChange={(e) => setSmtpPassword(e.target.value)}
+                      disabled={savingSettings}
+                      required={activeService === 'gmail' && !smtpUsername}
+                    />
+                  </div>
+                </div>
+
+                <div className="glass-panel" style={{ padding: '1rem', background: 'rgba(255,255,255,0.02)', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                  <strong>🔒 Gmail Sending Requirements:</strong>
+                  <ul style={{ paddingLeft: '1.25rem', marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <li>Google no longer allows sending via standard passwords (third-party/less secure apps).</li>
+                    <li>You <strong>must</strong> generate a 16-character <strong>App Password</strong> in your Google Account security settings.</li>
+                    <li>Make sure 2-Step Verification is enabled on your Gmail account to see the App Passwords option.</li>
+                  </ul>
+                </div>
+              </div>
+            )}
+
             {/* Global Sender Identity (Required for both SMTP and Mailgun) */}
             <div className="settings-form-grid" style={{ marginBottom: 0 }}>
               <div className="form-group">
@@ -2507,14 +2562,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                   type="email"
                   className="form-control"
                   placeholder="e.g. outreach@mybusiness.com"
-                  value={activeService === 'mailgun' ? 'contact@rollinhead.com' : smtpSenderEmail}
+                  value={activeService === 'mailgun' ? 'contact@rollinhead.com' : (activeService === 'gmail' ? smtpUsername : smtpSenderEmail)}
                   onChange={(e) => setSmtpSenderEmail(e.target.value)}
-                  disabled={savingSettings || activeService === 'mailgun'}
+                  disabled={savingSettings || activeService === 'mailgun' || activeService === 'gmail'}
                   required
                 />
                 {activeService === 'mailgun' && (
                   <span style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '0.25rem', display: 'block' }}>
                     🔒 Forced to contact@rollinhead.com for Mailgun domain compliance.
+                  </span>
+                )}
+                {activeService === 'gmail' && (
+                  <span style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '0.25rem', display: 'block' }}>
+                    🔒 Forced to your Gmail address for authentication compliance.
                   </span>
                 )}
               </div>
@@ -3067,7 +3127,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                       onChange={() => setBulkService('smtp')}
                       disabled={bulkSending}
                     />
-                    Autopilot (SMTP/Mailgun Settings)
+                    Autopilot (Saved Settings)
                   </label>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                     <input
