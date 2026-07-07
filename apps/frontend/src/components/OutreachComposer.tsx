@@ -22,11 +22,25 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
   const [tempEmails, setTempEmails] = useState<string[]>([]);
   const [customEmailInput, setCustomEmailInput] = useState('');
   const [selectedRecipients, setSelectedRecipients] = useState<string[]>(() => {
-    const initialOptions = [
-      ...(lead.manual_email ? [lead.manual_email] : []),
-      ...(lead.fetched_emails || [])
-    ];
-    return Array.from(new Set(initialOptions));
+    let emails: string[] = [];
+    if (lead.manual_email) {
+      emails.push(lead.manual_email);
+    }
+    if (lead.fetched_emails) {
+      if (Array.isArray(lead.fetched_emails)) {
+        emails = [...emails, ...lead.fetched_emails];
+      } else if (typeof lead.fetched_emails === 'string') {
+        try {
+          const parsed = JSON.parse(lead.fetched_emails);
+          if (Array.isArray(parsed)) {
+            emails = [...emails, ...parsed];
+          }
+        } catch (e) {
+          emails.push(lead.fetched_emails);
+        }
+      }
+    }
+    return Array.from(new Set(emails));
   });
 
   const [service, setService] = useState<'smtp' | 'gmail'>('smtp');
@@ -123,11 +137,27 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
     }
   };
 
-  const emailOptions = [
-    ...(lead.manual_email ? [lead.manual_email] : []),
-    ...(lead.fetched_emails || []),
-    ...tempEmails
-  ];
+  const emailOptions = (() => {
+    let emails: string[] = [];
+    if (lead.manual_email) {
+      emails.push(lead.manual_email);
+    }
+    if (lead.fetched_emails) {
+      if (Array.isArray(lead.fetched_emails)) {
+        emails = [...emails, ...lead.fetched_emails];
+      } else if (typeof lead.fetched_emails === 'string') {
+        try {
+          const parsed = JSON.parse(lead.fetched_emails);
+          if (Array.isArray(parsed)) {
+            emails = [...emails, ...parsed];
+          }
+        } catch (e) {
+          emails.push(lead.fetched_emails);
+        }
+      }
+    }
+    return [...emails, ...tempEmails];
+  })();
   // Remove duplicates
   const uniqueEmailOptions = Array.from(new Set(emailOptions));
 

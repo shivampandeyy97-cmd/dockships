@@ -14,6 +14,16 @@ import { startGmailPollingCron } from './services/gmailPoller';
 
 dotenv.config();
 
+function parseLeadRow(lead: any) {
+  if (!lead) return lead;
+  return {
+    ...lead,
+    fetched_emails: typeof lead.fetched_emails === 'string'
+      ? JSON.parse(lead.fetched_emails || '[]')
+      : (lead.fetched_emails || [])
+  };
+}
+
 const app = express();
 const PORT = process.env.PORT || 4001;
 
@@ -460,7 +470,7 @@ app.post('/api/leads/:id/crawl', async (req, res) => {
     );
 
     const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
-    return res.json(updated);
+    return res.json(parseLeadRow(updated));
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Crawl request failed.' });
   }
@@ -789,7 +799,7 @@ app.post('/api/leads/:id/emails', async (req, res) => {
     );
 
     const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
-    return res.json(updated);
+    return res.json(parseLeadRow(updated));
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to add email.' });
   }
@@ -825,7 +835,7 @@ app.delete('/api/leads/:id/emails', async (req, res) => {
     );
 
     const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
-    return res.json(updated);
+    return res.json(parseLeadRow(updated));
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to delete email.' });
   }
@@ -842,7 +852,7 @@ app.patch('/api/leads/:id/poc', async (req, res) => {
       [pocName ? pocName.trim() : null, id]
     );
     const updated = await getRow('SELECT * FROM dockships_leads WHERE id = ?', [id]);
-    return res.json(updated);
+    return res.json(parseLeadRow(updated));
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to update POC name.' });
   }
