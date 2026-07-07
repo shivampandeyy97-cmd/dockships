@@ -3071,7 +3071,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                       onChange={() => setBulkService('smtp')}
                       disabled={bulkSending}
                     />
-                    Autopilot (Saved Settings)
+                    Autopilot (Saved Gmail/SMTP Settings)
                   </label>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                     <input
@@ -3081,7 +3081,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                       onChange={() => setBulkService('gmail')}
                       disabled={bulkSending}
                     />
-                    Gmail (Direct SMTP Relay)
+                    Gmail Override (Direct App Password)
                   </label>
                 </div>
               </div>
