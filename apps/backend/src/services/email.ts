@@ -129,6 +129,11 @@ export async function sendOutreachEmail(
       postData.append('subject', options.subject);
       postData.append('text', options.body.replace(/<[^>]*>/g, ''));
       postData.append('html', options.body);
+      
+      // Enable Mailgun native tracking to ensure maximum inbox delivery placement
+      postData.append('o:tracking', 'yes');
+      postData.append('o:tracking-clicks', 'yes');
+      postData.append('o:tracking-opens', 'yes');
 
       const response = await axios.post(
         `${mailgunBaseUrl}/v3/${mailgunDomain}/messages`,

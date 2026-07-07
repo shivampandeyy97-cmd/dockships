@@ -10,6 +10,7 @@ import { crawlWebsite, checkAdsTxt } from './services/crawler';
 import { sendOutreachEmail } from './services/email';
 import { sendSlackMessage, sendSlackAlert, getSlackSettings, initSlackClient, handleSlackCommand } from './services/slack';
 import { dockshipsAgent } from './services/agent';
+import { startGmailPollingCron } from './services/gmailPoller';
 
 dotenv.config();
 
@@ -42,6 +43,8 @@ initializeSchema()
       initSlackClient(slackSettings.bot_token);
       console.log('🔔 Slack integration initialized.');
     }
+    // Start polling Gmail inbox for replies
+    startGmailPollingCron();
   })
   .catch((err) => {
     console.error('Failed to initialize database schema:', err);
