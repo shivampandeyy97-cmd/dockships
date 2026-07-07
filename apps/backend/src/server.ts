@@ -50,12 +50,6 @@ initializeSchema()
     console.error('Failed to initialize database schema:', err);
   });
 
-// Mailgun signature verification helper
-function verifyMailgunSignature(apiKey: string, token: string, timestamp: string, signature: string): boolean {
-  const value = timestamp + token;
-  const hash = crypto.createHmac('sha256', apiKey).update(value).digest('hex');
-  return hash === signature;
-}
 
 // Mail merge status hierarchy configuration matching YAMM behavior
 const STATUS_LEVELS: Record<string, number> = {
@@ -206,7 +200,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// GET SMTP & Mailgun Settings for a user
+// GET SMTP & Gmail Settings for a user
 app.get('/api/settings/smtp', async (req, res) => {
   const { userId } = req.query;
   if (!userId) {
@@ -215,8 +209,7 @@ app.get('/api/settings/smtp', async (req, res) => {
 
   try {
     const settings = await getRow(
-      `SELECT host, port, username, sender_name, sender_email, 
-              mailgun_api_key, mailgun_domain, active_service 
+      `SELECT host, port, username, sender_name, sender_email, active_service 
        FROM dockships_smtp_settings WHERE user_id = ?`,
       [userId]
     );
@@ -226,11 +219,10 @@ app.get('/api/settings/smtp', async (req, res) => {
   }
 });
 
-// SAVE SMTP & Mailgun Settings for a user
+// SAVE SMTP & Gmail Settings for a user
 app.post('/api/settings/smtp', async (req, res) => {
   const { 
-    userId, host, port, username, password, senderName, senderEmail,
-    mailgunApiKey, mailgunDomain, activeService 
+    userId, host, port, username, password, senderName, senderEmail, activeService 
   } = req.body;
 
   const selectedService = activeService || 'smtp';
@@ -244,9 +236,9 @@ app.post('/api/settings/smtp', async (req, res) => {
   }
 
   try {
-    // Fetch existing settings to preserve passwords/API keys
+    // Fetch existing settings to preserve passwords
     const existing = await getRow<any>(
-      'SELECT password, mailgun_api_key FROM dockships_smtp_settings WHERE user_id = ?',
+      'SELECT password FROM dockships_smtp_settings WHERE user_id = ?',
       [userId]
     );
 
@@ -255,18 +247,9 @@ app.post('/api/settings/smtp', async (req, res) => {
       finalPassword = existing.password;
     }
 
-    let finalMailgunApiKey = mailgunApiKey;
-    if ((!finalMailgunApiKey || finalMailgunApiKey === '••••••••••••••••') && existing) {
-      finalMailgunApiKey = existing.mailgun_api_key;
-    }
-
     if (selectedService === 'smtp') {
       if (!host || !port || !username || !finalPassword) {
         return res.status(400).json({ error: 'All SMTP configuration fields (including password) are required.' });
-      }
-    } else if (selectedService === 'mailgun') {
-      if (!finalMailgunApiKey || !mailgunDomain) {
-        return res.status(400).json({ error: 'Mailgun API Key and Domain are required.' });
       }
     } else if (selectedService === 'gmail') {
       if (!username || !finalPassword) {
@@ -276,10 +259,9 @@ app.post('/api/settings/smtp', async (req, res) => {
 
     await runQuery(
       `INSERT INTO dockships_smtp_settings (
-        user_id, host, port, username, password, sender_name, sender_email,
-        mailgun_api_key, mailgun_domain, active_service
+        user_id, host, port, username, password, sender_name, sender_email, active_service
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET
          host=excluded.host,
          port=excluded.port,
@@ -287,8 +269,6 @@ app.post('/api/settings/smtp', async (req, res) => {
          password=excluded.password,
          sender_name=excluded.sender_name,
          sender_email=excluded.sender_email,
-         mailgun_api_key=excluded.mailgun_api_key,
-         mailgun_domain=excluded.mailgun_domain,
          active_service=excluded.active_service`,
       [
         userId, 
@@ -298,8 +278,6 @@ app.post('/api/settings/smtp', async (req, res) => {
         finalPassword || null, 
         senderName ? senderName.trim() : null, 
         finalSenderEmail.trim(),
-        selectedService === 'gmail' ? null : (finalMailgunApiKey ? finalMailgunApiKey.trim() : null),
-        selectedService === 'gmail' ? null : (mailgunDomain ? mailgunDomain.trim() : null),
         selectedService
       ]
     );
@@ -688,165 +666,7 @@ app.get('/api/emails/click/:emailId', async (req, res) => {
   return res.redirect(url);
 });
 
-// POST Mailgun webhook (handles open, click, failed [bounce], delivered, and replied [responded] events)
-app.post('/api/emails/webhook', async (req, res) => {
-  console.log('Received Mailgun webhook payload:', JSON.stringify(req.body));
-  const body = req.body;
 
-  try {
-    // 1. Signature Verification if signature object and API key are available
-    const signature = body.signature;
-    if (signature && signature.timestamp && signature.token && signature.signature) {
-      const settings = await getRow<{ mailgun_api_key: string }>('SELECT mailgun_api_key FROM dockships_smtp_settings WHERE mailgun_api_key IS NOT NULL LIMIT 1');
-      const apiKey = settings?.mailgun_api_key || process.env.MAILGUN_API_KEY;
-      if (apiKey) {
-        const verified = verifyMailgunSignature(apiKey, signature.token, signature.timestamp, signature.signature);
-        if (!verified) {
-          console.warn('⚠️ [Webhook] Mailgun Webhook signature verification failed! Skipping strict abort for testing.');
-        } else {
-          console.log('✅ [Webhook] Mailgun signature verified successfully.');
-        }
-      }
-    }
-
-    // Helper to log event to timeline
-    async function logEmailEvent(emailId: string, eventType: string, metadata?: object) {
-      try {
-        const eventId = crypto.randomUUID();
-        await runQuery(
-          `INSERT INTO dockships_email_events (id, email_id, event_type, event_time, metadata) VALUES (?, ?, ?, datetime('now'), ?)`,
-          [eventId, emailId, eventType, metadata ? JSON.stringify(metadata) : null]
-        );
-      } catch (e) { /* ignore */ }
-    }
-
-    // 2. Parse Mailgun event tracking data
-    const eventData = body['event-data'];
-    if (eventData) {
-      const eventType = eventData.event; // 'opened', 'clicked', 'failed', 'delivered', 'replied'
-      const recipient = eventData.recipient;
-      
-      console.log(`[Webhook] Event: ${eventType} to recipient: ${recipient}`);
-
-      if (recipient) {
-        const cleanRecipient = recipient.trim().toLowerCase();
-        const emailRow = await getRow<{ id: string, lead_id: string, status: string }>(
-          'SELECT id, lead_id, status FROM dockships_emails WHERE recipient_email = ? ORDER BY sent_at DESC LIMIT 1',
-          [cleanRecipient]
-        );
-
-        if (emailRow) {
-          const leadRow = await getRow<{ status: string }>('SELECT status FROM dockships_leads WHERE id = ?', [emailRow.lead_id]);
-          let dbStatus = 'sent';
-          if (eventType === 'opened') dbStatus = 'opened';
-          else if (eventType === 'clicked') dbStatus = 'clicked';
-          else if (eventType === 'failed') dbStatus = 'bounced';
-          else if (eventType === 'delivered') dbStatus = 'delivered';
-          else if (eventType === 'replied') dbStatus = 'reverted';
-
-          const now = new Date().toISOString();
-
-          // Handle YAMM status hierarchy
-          if (shouldUpdateEmailStatus(emailRow.status, dbStatus)) {
-            let updateQuery = "UPDATE dockships_emails SET status = ?";
-            const params: any[] = [dbStatus];
-
-            if (dbStatus === 'opened') {
-              updateQuery += ", opened_at = ?";
-              params.push(now);
-            } else if (dbStatus === 'clicked') {
-              updateQuery += ", clicked_at = ?";
-              params.push(now);
-            } else if (dbStatus === 'delivered') {
-              updateQuery += ", delivered_at = ?";
-              params.push(now);
-            } else if (dbStatus === 'bounced') {
-              const bounceReason = eventData['delivery-status']?.message || eventData.reason || 'Hard bounce';
-              updateQuery += ", reverted_at = ?, bounce_reason = ?";
-              params.push(now, bounceReason);
-            } else if (dbStatus === 'reverted') {
-              updateQuery += ", reverted_at = ?, reply_count = reply_count + 1";
-              params.push(now);
-            }
-            updateQuery += " WHERE id = ?";
-            params.push(emailRow.id);
-
-            await runQuery(updateQuery, params);
-          } else {
-            // If already reverted/replied, we still increment reply count on new replies
-            if (dbStatus === 'reverted') {
-              await runQuery(
-                "UPDATE dockships_emails SET reply_count = reply_count + 1, reverted_at = ? WHERE id = ?",
-                [now, emailRow.id]
-              );
-            }
-          }
-
-          if (leadRow && shouldUpdateLeadStatus(leadRow.status, dbStatus)) {
-            await runQuery("UPDATE dockships_leads SET status = ? WHERE id = ?", [dbStatus, emailRow.lead_id]);
-          }
-          
-          // Always log to event timeline
-          await logEmailEvent(emailRow.id, dbStatus, {
-            source: 'mailgun_webhook',
-            recipient: cleanRecipient,
-            rawEvent: eventType,
-            ip: eventData.ip,
-            userAgent: eventData['client-info']?.['user-agent'],
-            url: eventData.url,
-            reason: eventData['delivery-status']?.message
-          });
-          
-          console.log(`[Webhook] Logged event ${eventType} -> SQLite for lead ${emailRow.lead_id}`);
-        }
-      }
-    } 
-    // 3. Fallback: Parse Mailgun inbound reply webhook (when a route forwards custom headers/parameters)
-    else {
-      const sender = body.sender || body.Sender || body['from'];
-      if (sender) {
-        const emailMatch = sender.match(/<([^>]+)>/) || [null, sender];
-        const cleanSender = (emailMatch[1] || sender).trim().toLowerCase();
-
-        const email = await getRow<{ id: string, lead_id: string, status: string }>(
-          `SELECT id, lead_id, status FROM dockships_emails 
-           WHERE recipient_email = ? 
-           ORDER BY sent_at DESC LIMIT 1`,
-          [cleanSender]
-        );
-
-        if (email) {
-          const lead = await getRow<{ status: string }>('SELECT status FROM dockships_leads WHERE id = ?', [email.lead_id]);
-          
-          if (shouldUpdateEmailStatus(email.status, 'reverted')) {
-            await runQuery(
-              "UPDATE dockships_emails SET status = 'reverted', reverted_at = datetime('now'), reply_count = reply_count + 1 WHERE id = ?",
-              [email.id]
-            );
-          } else {
-            await runQuery(
-              "UPDATE dockships_emails SET reply_count = reply_count + 1, reverted_at = datetime('now') WHERE id = ?",
-              [email.id]
-            );
-          }
-
-          if (lead && shouldUpdateLeadStatus(lead.status, 'reverted')) {
-            await runQuery(
-              "UPDATE dockships_leads SET status = 'reverted' WHERE id = ?",
-              [email.lead_id]
-            );
-          }
-          await logEmailEvent(email.id, 'reverted', { source: 'inbound_reply', sender: cleanSender });
-          console.log(`[Webhook] Reply webhook success: marked lead ${email.lead_id} as reverted/replied.`);
-        }
-      }
-    }
-  } catch (err: any) {
-    console.error('[Webhook] Failed to process webhook message:', err.message);
-  }
-
-  return res.status(200).json({ received: true });
-});
 
 // PATCH endpoint to override status manually (sent, delivered, opened, clicked, bounced, reverted)
 app.patch('/api/emails/:emailId/status', async (req, res) => {
@@ -1806,7 +1626,7 @@ app.get('*', (req, res, next) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Dockships API Server (SQLite Edition) running on port ${PORT}`);
-  // Auto-simulate is disabled by default — real tracking via Mailgun webhooks and pixel tracker is active
+  // Auto-simulate is disabled by default — real tracking via pixel tracker and Gmail poller is active
   // Uncomment the line below only for demo/testing purposes:
   // setInterval(automateEmailStatusShifting, 5000);
 });

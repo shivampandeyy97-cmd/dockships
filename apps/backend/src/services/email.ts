@@ -9,7 +9,7 @@ export interface SendEmailOptions {
   to: string;
   subject: string;
   body: string;
-  service?: 'smtp' | 'gmail' | 'mailgun';
+  service?: 'smtp' | 'gmail';
   gmailConfig?: {
     user: string;
     pass: string;
@@ -24,13 +24,11 @@ interface SmtpSettings {
   password?: string;
   sender_name?: string;
   sender_email: string;
-  mailgun_api_key?: string;
-  mailgun_domain?: string;
-  active_service?: 'smtp' | 'mailgun' | 'gmail';
+  active_service?: 'smtp' | 'gmail';
 }
 
 /**
- * Sends outreach email using user's saved SMTP settings, Mailgun API, custom dynamic Gmail input, or falls back to default Mailgun / mock.
+ * Sends outreach email using user's saved SMTP settings, custom dynamic Gmail input, or falls back to mock console logs.
  */
 export async function sendOutreachEmail(
   options: SendEmailOptions,
@@ -103,56 +101,6 @@ export async function sendOutreachEmail(
       };
     }
 
-    // Resolve Mailgun Credentials (use saved settings, falling back to process.env defaults)
-    const mailgunApiKey = settings?.mailgun_api_key || process.env.MAILGUN_API_KEY;
-    const mailgunDomain = settings?.mailgun_domain || process.env.MAILGUN_DOMAIN;
-    const mailgunBaseUrl = process.env.MAILGUN_BASE_URL || 'https://api.mailgun.net';
-    const isMailgunActive = settings?.active_service === 'mailgun' || options.service === 'mailgun' || (!settings && !!mailgunApiKey);
-    const senderEmail = isMailgunActive ? 'contact@rollinhead.com' : (settings?.sender_email || process.env.DEFAULT_SENDER_EMAIL || 'contact@rollinhead.com');
-    const senderName = settings?.sender_name || 'Dockships Outreach';
-
-    // Subcase 2A: Mailgun API Dispatcher (Active either by user settings, or as default fallback)
-    if (isMailgunActive) {
-      console.log(`Using Mailgun API configuration: domain = ${mailgunDomain}`);
-      if (!mailgunApiKey || !mailgunDomain) {
-        throw new Error('Mailgun configuration is missing API key or Domain. Configure them in Settings or .env first.');
-      }
-
-      const authHeader = 'Basic ' + Buffer.from(`api:${mailgunApiKey}`).toString('base64');
-      const postData = new URLSearchParams();
-      const fromAddress = senderName 
-        ? `"${senderName}" <${senderEmail}>`
-        : senderEmail;
-
-      postData.append('from', fromAddress);
-      postData.append('to', options.to);
-      postData.append('subject', options.subject);
-      postData.append('text', options.body.replace(/<[^>]*>/g, ''));
-      postData.append('html', options.body);
-      
-      // Enable Mailgun native tracking to ensure maximum inbox delivery placement
-      postData.append('o:tracking', 'yes');
-      postData.append('o:tracking-clicks', 'yes');
-      postData.append('o:tracking-opens', 'yes');
-
-      const response = await axios.post(
-        `${mailgunBaseUrl}/v3/${mailgunDomain}/messages`,
-        postData,
-        {
-          headers: {
-            'Authorization': authHeader,
-            'Content-Type': 'application/x-www-form-urlencoded'
-          }
-        }
-      );
-
-      console.log('Mailgun API sent successfully:', response.data);
-      return {
-        success: true,
-        messageId: response.data.id || 'mailgun-success-id'
-      };
-    } 
-    
     // Subcase 2B: Standard SMTP Dispatcher (if settings exist and SMTP is active)
     if (settings && settings.active_service === 'smtp' && settings.host && settings.port && settings.username && settings.password) {
       console.log(`Using saved SMTP configuration: ${settings.host}:${settings.port}`);
@@ -194,7 +142,7 @@ export async function sendOutreachEmail(
       };
     }
 
-    // Case 3: Fallback to Mock logs if no settings or default Mailgun is configured
+    // Case 3: Fallback to Mock logs if no settings are configured
     console.log(`⚠️ User ${userId} has no email settings configured. Logging email output to console only.`);
     console.log(`============== MOCK EMAIL OUTREACH ==============`);
     console.log(`To: ${options.to}`);

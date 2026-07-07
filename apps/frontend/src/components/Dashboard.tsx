@@ -228,15 +228,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
 
   // Settings states
-  const [activeService, setActiveService] = useState<'smtp' | 'mailgun' | 'gmail'>('smtp');
+  const [activeService, setActiveService] = useState<'smtp' | 'gmail'>('smtp');
   const [smtpHost, setSmtpHost] = useState('');
   const [smtpPort, setSmtpPort] = useState('587');
   const [smtpUsername, setSmtpUsername] = useState('');
   const [smtpPassword, setSmtpPassword] = useState('');
   const [smtpSenderName, setSmtpSenderName] = useState('');
   const [smtpSenderEmail, setSmtpSenderEmail] = useState('');
-  const [mailgunApiKey, setMailgunApiKey] = useState('');
-  const [mailgunDomain, setMailgunDomain] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState({ success: '', error: '' });
 
@@ -706,8 +704,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           setSmtpUsername(data.username || '');
           setSmtpSenderName(data.sender_name || '');
           setSmtpSenderEmail(data.sender_email || '');
-          setMailgunDomain(data.mailgun_domain || '');
-          setMailgunApiKey(data.mailgun_api_key ? '••••••••••••••••' : '');
           setActiveService(data.active_service || 'smtp');
         }
       }
@@ -1217,11 +1213,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           username: smtpUsername,
           password: smtpPassword,
           senderName: smtpSenderName,
-          senderEmail: activeService === 'mailgun' 
-            ? 'contact@rollinhead.com' 
-            : (activeService === 'gmail' ? smtpUsername : smtpSenderEmail),
-          mailgunApiKey: activeService === 'gmail' ? undefined : (mailgunApiKey || undefined),
-          mailgunDomain: activeService === 'gmail' ? undefined : (mailgunDomain || undefined),
+          senderEmail: activeService === 'gmail' ? smtpUsername : smtpSenderEmail,
           activeService
         })
       });
@@ -1232,8 +1224,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       }
 
       setSettingsStatus({ success: 'Configuration successfully saved!', error: '' });
-      setSmtpPassword(''); 
-      setMailgunApiKey('');
+      setSmtpPassword('');
     } catch (err: any) {
       setSettingsStatus({ success: '', error: err.message || 'Network error occurred.' });
     } finally {
@@ -2306,7 +2297,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                                 className="btn btn-secondary"
                                 style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--danger)' }}
                                 onClick={(e) => { e.stopPropagation(); handleSimulateBounce(log.recipient_email); }}
-                                title="Simulate Mailgun permanent bounce event"
+                                title="Simulate permanent bounce event"
                               >
                                 🚫 Bounce
                               </button>
@@ -2346,12 +2337,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         </main>
       )}
 
-      {/* SMTP / Mailgun Settings Tab */}
+      {/* SMTP / Gmail Settings Tab */}
       {activeTab === 'settings' && (
         <main className="glass-panel" style={{ padding: '2rem', maxWidth: '800px', margin: '0 auto' }}>
           <h2 className="card-title">Outreach Service Settings</h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
-            Configure your custom outgoing SMTP mail server or Mailgun API details. These settings will be securely used to send targeted proposals to your leads.
+            Configure your custom outgoing SMTP mail server or Gmail settings. These settings will be securely used to send targeted proposals to your leads.
           </p>
 
           {settingsStatus.success && (
@@ -2379,16 +2370,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                     disabled={savingSettings}
                   />
                   SMTP Mail Server
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="active-service-type"
-                    checked={activeService === 'mailgun'}
-                    onChange={() => setActiveService('mailgun')}
-                    disabled={savingSettings}
-                  />
-                  Mailgun API
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                   <input
@@ -2464,38 +2445,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
               </div>
             )}
 
-            {/* Conditionally Render Mailgun Fields */}
-            {activeService === 'mailgun' && (
-              <div className="settings-form-grid">
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" htmlFor="mailgun-domain">Mailgun Domain</label>
-                  <input
-                    id="mailgun-domain"
-                    type="text"
-                    className="form-control"
-                    placeholder="e.g. mg.mydomain.com"
-                    value={mailgunDomain}
-                    onChange={(e) => setMailgunDomain(e.target.value)}
-                    disabled={savingSettings}
-                    required={activeService === 'mailgun'}
-                  />
-                </div>
-
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" htmlFor="mailgun-key">Mailgun API Key</label>
-                  <input
-                    id="mailgun-key"
-                    type="password"
-                    className="form-control"
-                    placeholder="key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                    value={mailgunApiKey}
-                    onChange={(e) => setMailgunApiKey(e.target.value)}
-                    disabled={savingSettings}
-                    required={activeService === 'mailgun' && !mailgunDomain} 
-                  />
-                </div>
-              </div>
-            )}
 
             {/* Conditionally Render Gmail Fields */}
             {activeService === 'gmail' && (
@@ -2540,7 +2489,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
               </div>
             )}
 
-            {/* Global Sender Identity (Required for both SMTP and Mailgun) */}
+            {/* Global Sender Identity (Required for both SMTP and Gmail) */}
             <div className="settings-form-grid" style={{ marginBottom: 0 }}>
               <div className="form-group">
                 <label className="form-label" htmlFor="smtp-sender-name">Sender Display Name</label>
@@ -2562,16 +2511,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                   type="email"
                   className="form-control"
                   placeholder="e.g. outreach@mybusiness.com"
-                  value={activeService === 'mailgun' ? 'contact@rollinhead.com' : (activeService === 'gmail' ? smtpUsername : smtpSenderEmail)}
+                  value={activeService === 'gmail' ? smtpUsername : smtpSenderEmail}
                   onChange={(e) => setSmtpSenderEmail(e.target.value)}
-                  disabled={savingSettings || activeService === 'mailgun' || activeService === 'gmail'}
+                  disabled={savingSettings || activeService === 'gmail'}
                   required
                 />
-                {activeService === 'mailgun' && (
-                  <span style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '0.25rem', display: 'block' }}>
-                    🔒 Forced to contact@rollinhead.com for Mailgun domain compliance.
-                  </span>
-                )}
                 {activeService === 'gmail' && (
                   <span style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '0.25rem', display: 'block' }}>
                     🔒 Forced to your Gmail address for authentication compliance.
