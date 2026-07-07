@@ -19,6 +19,7 @@ interface OutreachComposerProps {
 }
 
 export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId, onClose, onSent, drafts }) => {
+  const safeDrafts = Array.isArray(drafts) ? drafts : [];
   const [tempEmails, setTempEmails] = useState<string[]>([]);
   const [customEmailInput, setCustomEmailInput] = useState('');
   const [selectedRecipients, setSelectedRecipients] = useState<string[]>(() => {
@@ -60,7 +61,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
       );
       return;
     }
-    const selected = drafts?.find((d) => d.id === templateId);
+    const selected = safeDrafts.find((d) => d.id === templateId);
     if (selected) {
       const pocName = lead.poc_name || 'Team';
       const replacedSubject = selected.subject
@@ -311,7 +312,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
           </div>
 
           {/* Template Selector Dropdown */}
-          {drafts && drafts.length > 0 && (
+          {safeDrafts.length > 0 && (
             <div className="form-group">
               <label className="form-label">Select Saved Draft Template</label>
               <select
@@ -321,7 +322,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
                 disabled={loading}
               >
                 <option value="">-- No Template Selected (Use Default) --</option>
-                {drafts.map((d) => (
+                {safeDrafts.map((d) => (
                   <option key={d.id} value={d.id}>
                     {d.subject}
                   </option>
