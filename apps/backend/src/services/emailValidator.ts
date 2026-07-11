@@ -58,6 +58,13 @@ export async function validateEmailDomain(email: string): Promise<boolean> {
  */
 export function filterBounceRiskEmails(emails: string[]): string[] {
   return emails.filter(email => {
+    const lower = email.toLowerCase().trim();
+    if (lower.includes('sentry')) return false;
+    const parts = lower.split('@');
+    if (parts.length > 0) {
+      const localPart = parts[0];
+      if (/^[0-9a-f]{20,}$/i.test(localPart)) return false;
+    }
     const local = email.split('@')[0].toLowerCase().replace(/[^a-z]/g, '');
     return !BOUNCE_RISK_PREFIXES.some(prefix => local === prefix || local.startsWith(prefix));
   });

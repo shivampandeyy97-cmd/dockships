@@ -41,7 +41,18 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
         }
       }
     }
-    return Array.from(new Set(emails));
+    // Filter out garbage/sentry/hex-hash tracker emails
+    const cleanEmails = emails.filter((email) => {
+      const lower = email.toLowerCase().trim();
+      if (lower.includes('sentry')) return false;
+      const parts = lower.split('@');
+      if (parts.length > 0) {
+        const localPart = parts[0];
+        if (/^[0-9a-f]{20,}$/i.test(localPart)) return false;
+      }
+      return true;
+    });
+    return Array.from(new Set(cleanEmails));
   });
 
   const [subject, setSubject] = useState(`Outreach Partnership Proposal — ${lead.website}`);
@@ -84,7 +95,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedRecipients.length === 0) {
-      setError('Please select at least one recipient email address.');
+      setError('Please add at least one recipient email address.');
       return;
     }
     if (!subject || !body) {
@@ -127,29 +138,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
     }
   };
 
-  const emailOptions = (() => {
-    let emails: string[] = [];
-    if (lead.manual_email) {
-      emails.push(lead.manual_email);
-    }
-    if (lead.fetched_emails) {
-      if (Array.isArray(lead.fetched_emails)) {
-        emails = [...emails, ...lead.fetched_emails];
-      } else if (typeof lead.fetched_emails === 'string') {
-        try {
-          const parsed = JSON.parse(lead.fetched_emails);
-          if (Array.isArray(parsed)) {
-            emails = [...emails, ...parsed];
-          }
-        } catch (e) {
-          emails.push(lead.fetched_emails);
-        }
-      }
-    }
-    return [...emails, ...tempEmails];
-  })();
-  // Remove duplicates
-  const uniqueEmailOptions = Array.from(new Set(emailOptions));
+
 
   const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.target === e.currentTarget) {
@@ -183,7 +172,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
             <label className="form-label">Recipient Emails</label>
             <div style={{
               display: 'flex',
-              flexDirection: 'column',
+              flexWrap: 'wrap',
               gap: '0.5rem',
               marginBottom: '0.75rem',
               maxHeight: '150px',
@@ -193,26 +182,50 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
               borderRadius: '8px',
               background: 'var(--input-bg)'
             }}>
-              {uniqueEmailOptions.map((mail) => (
-                <label key={mail} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-bright)' }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedRecipients.includes(mail)}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setSelectedRecipients([...selectedRecipients, mail]);
-                      } else {
-                        setSelectedRecipients(selectedRecipients.filter((x) => x !== mail));
-                      }
-                    }}
-                    disabled={loading}
-                  />
+              {selectedRecipients.map((mail) => (
+                <span 
+                  key={mail} 
+                  className="email-tag" 
+                  style={{ 
+                    display: 'inline-flex', 
+                    alignItems: 'center', 
+                    gap: '0.25rem',
+                    background: 'rgba(99, 102, 241, 0.15)', 
+                    borderColor: 'rgba(99, 102, 241, 0.3)',
+                    padding: '0.35rem 0.6rem',
+                    borderRadius: '6px',
+                    fontSize: '0.85rem',
+                    color: 'var(--text-bright)'
+                  }}
+                >
                   {mail}
-                </label>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedRecipients(prev => prev.filter(x => x !== mail))}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'rgba(239, 68, 68, 0.8)',
+                      cursor: 'pointer',
+                      padding: '0 2px',
+                      fontSize: '0.9rem',
+                      marginLeft: '4px',
+                      lineHeight: 1,
+                      fontWeight: 'bold',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                    title="Remove recipient"
+                    disabled={loading}
+                  >
+                    &times;
+                  </button>
+                </span>
               ))}
-              {uniqueEmailOptions.length === 0 && (
+              {selectedRecipients.length === 0 && (
                 <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                  No contacts found. Use the manual adder below.
+                  No recipients specified. Please add one below.
                 </span>
               )}
             </div>
