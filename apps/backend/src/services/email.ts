@@ -142,7 +142,43 @@ export async function sendOutreachEmail(
       };
     }
 
-    // Case 3: Fallback to Mock logs if no settings are configured
+    // Case 3: Fallback to environment variables SMTP configurations
+    const envHost = process.env.SMTP_HOST;
+    const envPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
+    const envUser = process.env.SMTP_USER;
+    const envPass = process.env.SMTP_PASS;
+    const envFrom = process.env.SMTP_FROM || 'Dockships <contact@rollinhead.com>';
+
+    if (envHost && envUser && envPass) {
+      console.log(`Using environment SMTP configuration: ${envHost}:${envPort}`);
+      const transporter = nodemailer.createTransport({
+        host: envHost,
+        port: envPort,
+        secure: envPort === 465,
+        auth: {
+          user: envUser,
+          pass: envPass
+        }
+      });
+
+      const mailOptions = {
+        from: envFrom,
+        to: options.to,
+        subject: options.subject,
+        text: options.body.replace(/<[^>]*>/g, ''),
+        html: options.body
+      };
+
+      const info = await transporter.sendMail(mailOptions);
+      console.log('Environment SMTP sent successfully:', info.messageId || info);
+
+      return {
+        success: true,
+        messageId: info.messageId || 'env-id-success'
+      };
+    }
+
+    // Case 4: Fallback to Mock logs
     console.log(`⚠️ User ${userId} has no email settings configured. Logging email output to console only.`);
     console.log(`============== MOCK EMAIL OUTREACH ==============`);
     console.log(`To: ${options.to}`);

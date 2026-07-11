@@ -122,14 +122,21 @@ function parseCSV(text: string) {
   if (lines.length === 0) return [];
   
   const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/^["']|["']$/g, ''));
-  const websiteIndex = headers.findIndex(h => h.includes('website') || h.includes('domain') || h.includes('url'));
-  const emailIndex = headers.findIndex(h => h.includes('email') || h.includes('mail') || h.includes('contact'));
-  const pocIndex = headers.findIndex(h => h.includes('poc') || h.includes('name') || h.includes('person'));
+  const websiteIndex = headers.findIndex(h => h.includes('website') || h.includes('domain') || h.includes('url') || h.includes('business domain'));
+  const emailIndex = headers.findIndex(h => h.includes('email') || h.includes('mail') || h.includes('contact') || h.includes('email id') || h.includes('email ids') || h.includes('fetched_emails'));
+  const pocIndex = headers.findIndex(h => h.includes('poc') || h.includes('name') || h.includes('person') || h.includes('legal name'));
+  const liveIndex = headers.findIndex(h => h.includes('live') || h.includes('is live') || h.includes('domain status') || h.includes('domain_status'));
+  const adsIndex = headers.findIndex(h => h.includes('ads') || h.includes('ads.txt status') || h.includes('ads_txt_status'));
+
+  // If at least one header matches, we have headers. Otherwise, it is a raw/header-less CSV.
+  const hasHeaders = websiteIndex !== -1 || emailIndex !== -1 || pocIndex !== -1 || liveIndex !== -1 || adsIndex !== -1;
 
   interface ParsedLead {
     website: string;
     email?: string;
     pocName?: string;
+    domainStatus?: string;
+    adsTxtStatus?: string;
   }
 
   const parsedLeads: ParsedLead[] = [];
@@ -154,15 +161,41 @@ function parseCSV(text: string) {
     }
     tokens.push(currentToken.trim().replace(/^["']|["']$/g, ''));
 
-    const website = websiteIndex !== -1 ? tokens[websiteIndex] : tokens[0];
-    const email = emailIndex !== -1 ? tokens[emailIndex] : tokens[1];
-    const pocName = pocIndex !== -1 ? tokens[pocIndex] : tokens[2];
+    const website = websiteIndex !== -1 ? tokens[websiteIndex] : (hasHeaders ? undefined : tokens[0]);
+    const email = emailIndex !== -1 ? tokens[emailIndex] : (hasHeaders ? undefined : tokens[1]);
+    const pocName = pocIndex !== -1 ? tokens[pocIndex] : (hasHeaders ? undefined : tokens[2]);
+    const domainStatusVal = liveIndex !== -1 ? tokens[liveIndex] : undefined;
+    const adsTxtStatusVal = adsIndex !== -1 ? tokens[adsIndex] : undefined;
+
+    // Normalize domainStatus
+    let domainStatus = 'pending';
+    if (domainStatusVal) {
+      const dsv = domainStatusVal.trim().toLowerCase();
+      if (dsv === 'pass' || dsv === 'live' || dsv === 'yes' || dsv === 'true') {
+        domainStatus = 'pass';
+      } else if (dsv === 'failed' || dsv === 'offline' || dsv === 'no' || dsv === 'false') {
+        domainStatus = 'failed';
+      }
+    }
+
+    // Normalize adsTxtStatus
+    let adsTxtStatus = 'pending';
+    if (adsTxtStatusVal) {
+      const atv = adsTxtStatusVal.trim().toLowerCase();
+      if (atv === 'present' || atv === 'yes' || atv === 'true') {
+        adsTxtStatus = 'present';
+      } else if (atv === 'not present' || atv === 'no' || atv === 'false') {
+        adsTxtStatus = 'not present';
+      }
+    }
 
     if (website) {
       parsedLeads.push({
         website: website.trim(),
         email: email ? email.trim() : undefined,
-        pocName: pocName ? pocName.trim() : undefined
+        pocName: pocName ? pocName.trim() : undefined,
+        domainStatus,
+        adsTxtStatus
       });
     }
   }
@@ -227,16 +260,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [loadingLogs, setLoadingLogs] = useState(false);
 
 
-  // Settings states
-  const [activeService, setActiveService] = useState<'smtp' | 'gmail'>('smtp');
-  const [smtpHost, setSmtpHost] = useState('');
-  const [smtpPort, setSmtpPort] = useState('587');
-  const [smtpUsername, setSmtpUsername] = useState('');
-  const [smtpPassword, setSmtpPassword] = useState('');
-  const [smtpSenderName, setSmtpSenderName] = useState('');
-  const [smtpSenderEmail, setSmtpSenderEmail] = useState('');
-  const [savingSettings, setSavingSettings] = useState(false);
-  const [settingsStatus, setSettingsStatus] = useState({ success: '', error: '' });
+
 
   // Draft templates states
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -248,9 +272,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
   // Bulk Outreach Modal States
   const [showBulkModal, setShowBulkModal] = useState(false);
-  const [bulkService, setBulkService] = useState<'smtp' | 'gmail'>('smtp');
-  const [bulkGmailUser, setBulkGmailUser] = useState('');
-  const [bulkGmailPass, setBulkGmailPass] = useState('');
   const [bulkSubject, setBulkSubject] = useState('');
   const [bulkBody, setBulkBody] = useState('');
   const [bulkSending, setBulkSending] = useState(false);
@@ -693,24 +714,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
-  const fetchSmtpSettings = async () => {
-    try {
-      const response = await fetch(`${API_URL}/api/settings/smtp?userId=${user.id}`);
-      if (response.ok) {
-        const data = await response.json();
-        if (data) {
-          setSmtpHost(data.host || '');
-          setSmtpPort(String(data.port || '587'));
-          setSmtpUsername(data.username || '');
-          setSmtpSenderName(data.sender_name || '');
-          setSmtpSenderEmail(data.sender_email || '');
-          setActiveService(data.active_service || 'smtp');
-        }
-      }
-    } catch (e) {
-      console.error('Error loading Settings:', e);
-    }
-  };
+
 
   const fetchDrafts = async () => {
     setLoadingDrafts(true);
@@ -792,11 +796,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     const selectedIds = Object.keys(selectedLeadIds).filter(id => selectedLeadIds[id]);
     if (selectedIds.length === 0) return;
 
-    if (bulkService === 'gmail' && (!bulkGmailUser || !bulkGmailPass)) {
-      setBulkError('Please enter Gmail credentials.');
-      return;
-    }
-
     setBulkSending(true);
     setBulkError('');
     setBulkSuccess('');
@@ -810,8 +809,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           leadIds: selectedIds,
           subject: bulkSubject,
           body: bulkBody,
-          service: bulkService,
-          gmailConfig: bulkService === 'gmail' ? { user: bulkGmailUser, pass: bulkGmailPass } : undefined,
+          service: 'smtp', // Default to saved settings
           userId: user.id,
           disableTracking: disableBulkTracking
         })
@@ -822,19 +820,56 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         throw new Error(data.error || 'Bulk outreach failed.');
       }
 
-      const succeeded = data.results.filter((r: any) => r.success).length;
-      const failed = data.results.filter((r: any) => !r.success).length;
-
-      setBulkSuccess(`Outreach complete! Succeeded: ${succeeded}, Failed: ${failed}.`);
-      setSelectedLeadIds({});
-      fetchLeads();
-      setTimeout(() => {
-        setShowBulkModal(false);
-        setBulkSuccess('');
-      }, 3000);
+      const jobId = data.jobId;
+      if (jobId) {
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await fetch(`${API_URL}/api/leads/bulk-email/status/${jobId}`);
+            if (statusRes.ok) {
+              const jobData = await statusRes.json();
+              setBulkProgress({ current: jobData.current, total: jobData.total });
+              
+              if (jobData.status === 'completed') {
+                clearInterval(pollInterval);
+                setBulkSuccess(`Outreach complete! Succeeded: ${jobData.succeeded}, Failed: ${jobData.failed}.`);
+                setSelectedLeadIds({});
+                fetchLeads();
+                setBulkSending(false);
+                setTimeout(() => {
+                  setShowBulkModal(false);
+                  setBulkSuccess('');
+                }, 3000);
+              } else if (jobData.status === 'failed') {
+                clearInterval(pollInterval);
+                setBulkError(jobData.error || 'Background job processing failed.');
+                setBulkSending(false);
+              }
+            } else {
+              clearInterval(pollInterval);
+              setBulkError('Failed to fetch sending progress.');
+              setBulkSending(false);
+            }
+          } catch (pollErr: any) {
+            clearInterval(pollInterval);
+            setBulkError(pollErr.message || 'Error tracking progress.');
+            setBulkSending(false);
+          }
+        }, 1500);
+      } else {
+        // Fallback for direct responses
+        const succeeded = data.results?.filter((r: any) => r.success).length || 0;
+        const failed = data.results?.filter((r: any) => !r.success).length || 0;
+        setBulkSuccess(`Outreach complete! Succeeded: ${succeeded}, Failed: ${failed}.`);
+        setSelectedLeadIds({});
+        fetchLeads();
+        setBulkSending(false);
+        setTimeout(() => {
+          setShowBulkModal(false);
+          setBulkSuccess('');
+        }, 3000);
+      }
     } catch (err: any) {
       setBulkError(err.message || 'Connection error.');
-    } finally {
       setBulkSending(false);
     }
   };
@@ -873,7 +908,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
   useEffect(() => {
     fetchLeads();
-    fetchSmtpSettings();
     fetchDrafts();
     fetchEmailStats();
     
@@ -1197,40 +1231,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     }
   };
 
-  const handleSaveSmtpSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSavingSettings(true);
-    setSettingsStatus({ success: '', error: '' });
 
-    try {
-      const response = await fetch(`${API_URL}/api/settings/smtp`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.id,
-          host: activeService === 'gmail' ? undefined : smtpHost,
-          port: activeService === 'gmail' ? undefined : (smtpPort ? parseInt(smtpPort, 10) : undefined),
-          username: smtpUsername,
-          password: smtpPassword,
-          senderName: smtpSenderName,
-          senderEmail: activeService === 'gmail' ? smtpUsername : smtpSenderEmail,
-          activeService
-        })
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to save configuration.');
-      }
-
-      setSettingsStatus({ success: 'Configuration successfully saved!', error: '' });
-      setSmtpPassword('');
-    } catch (err: any) {
-      setSettingsStatus({ success: '', error: err.message || 'Network error occurred.' });
-    } finally {
-      setSavingSettings(false);
-    }
-  };
 
   // Stats
   const totalLeads = leads.length;
@@ -1277,13 +1278,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           >
             📋 Outreach Logs
           </button>
-          <button 
-            className={`btn ${activeTab === 'settings' ? 'btn-primary' : 'btn-secondary'}`}
-            onClick={() => setActiveTab('settings')}
-            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
-          >
-            ⚙️ SMTP Settings
-          </button>
+
           <button 
             className={`btn ${activeTab === 'agent' ? 'btn-primary' : 'btn-secondary'}`}
             onClick={() => setActiveTab('agent')}
@@ -2337,201 +2332,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         </main>
       )}
 
-      {/* SMTP / Gmail Settings Tab */}
-      {activeTab === 'settings' && (
-        <main className="glass-panel" style={{ padding: '2rem', maxWidth: '800px', margin: '0 auto' }}>
-          <h2 className="card-title">Outreach Service Settings</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1.5rem' }}>
-            Configure your custom outgoing SMTP mail server or Gmail settings. These settings will be securely used to send targeted proposals to your leads.
-          </p>
 
-          {settingsStatus.success && (
-            <div style={{ background: 'var(--success-glow)', color: '#34d399', padding: '0.75rem 1.25rem', borderRadius: '8px', border: '1px solid rgba(16, 185, 129, 0.2)', marginBottom: '1.25rem', fontSize: '0.9rem' }}>
-              {settingsStatus.success}
-            </div>
-          )}
-
-          {settingsStatus.error && (
-            <div style={{ background: 'var(--danger-glow)', color: '#f87171', padding: '0.75rem 1.25rem', borderRadius: '8px', border: '1px solid rgba(239, 68, 68, 0.2)', marginBottom: '1.25rem', fontSize: '0.9rem' }}>
-              {settingsStatus.error}
-            </div>
-          )}
-
-          <form onSubmit={handleSaveSmtpSettings}>
-            <div className="form-group" style={{ marginBottom: '1.5rem' }}>
-              <label className="form-label">Active Outreach Service</label>
-              <div style={{ display: 'flex', gap: '1rem', marginTop: '0.25rem' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="active-service-type"
-                    checked={activeService === 'smtp'}
-                    onChange={() => setActiveService('smtp')}
-                    disabled={savingSettings}
-                  />
-                  SMTP Mail Server
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="active-service-type"
-                    checked={activeService === 'gmail'}
-                    onChange={() => setActiveService('gmail')}
-                    disabled={savingSettings}
-                  />
-                  Gmail (App Password)
-                </label>
-              </div>
-            </div>
-
-            {/* Conditionally Render SMTP Fields */}
-            {activeService === 'smtp' && (
-              <div className="settings-form-grid">
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" htmlFor="smtp-host">SMTP Host</label>
-                  <input
-                    id="smtp-host"
-                    type="text"
-                    className="form-control"
-                    placeholder="e.g. smtp.gmail.com"
-                    value={smtpHost}
-                    onChange={(e) => setSmtpHost(e.target.value)}
-                    disabled={savingSettings}
-                    required={activeService === 'smtp'}
-                  />
-                </div>
-
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" htmlFor="smtp-port">SMTP Port</label>
-                  <input
-                    id="smtp-port"
-                    type="number"
-                    className="form-control"
-                    placeholder="e.g. 587 or 465"
-                    value={smtpPort}
-                    onChange={(e) => setSmtpPort(e.target.value)}
-                    disabled={savingSettings}
-                    required={activeService === 'smtp'}
-                  />
-                </div>
-
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" htmlFor="smtp-username">SMTP Username</label>
-                  <input
-                    id="smtp-username"
-                    type="text"
-                    className="form-control"
-                    placeholder="Username or Email"
-                    value={smtpUsername}
-                    onChange={(e) => setSmtpUsername(e.target.value)}
-                    disabled={savingSettings}
-                    required={activeService === 'smtp'}
-                  />
-                </div>
-
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" htmlFor="smtp-password">SMTP Password</label>
-                  <input
-                    id="smtp-password"
-                    type="password"
-                    className="form-control"
-                    placeholder="Enter Password to change"
-                    value={smtpPassword}
-                    onChange={(e) => setSmtpPassword(e.target.value)}
-                    disabled={savingSettings}
-                    required={activeService === 'smtp' && !smtpHost} 
-                  />
-                </div>
-              </div>
-            )}
-
-
-            {/* Conditionally Render Gmail Fields */}
-            {activeService === 'gmail' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', marginBottom: '1.5rem' }}>
-                <div className="settings-form-grid">
-                  <div className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label" htmlFor="gmail-address">Gmail Address</label>
-                    <input
-                      id="gmail-address"
-                      type="email"
-                      className="form-control"
-                      placeholder="e.g. yourname@gmail.com"
-                      value={smtpUsername}
-                      onChange={(e) => setSmtpUsername(e.target.value)}
-                      disabled={savingSettings}
-                      required={activeService === 'gmail'}
-                    />
-                  </div>
-                  <div className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label" htmlFor="gmail-app-password">Google App Password</label>
-                    <input
-                      id="gmail-app-password"
-                      type="password"
-                      className="form-control"
-                      placeholder="16-character App Password"
-                      value={smtpPassword}
-                      onChange={(e) => setSmtpPassword(e.target.value)}
-                      disabled={savingSettings}
-                      required={activeService === 'gmail' && !smtpUsername}
-                    />
-                  </div>
-                </div>
-
-                <div className="glass-panel" style={{ padding: '1rem', background: 'rgba(255,255,255,0.02)', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                  <strong>🔒 Gmail Sending Requirements:</strong>
-                  <ul style={{ paddingLeft: '1.25rem', marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
-                    <li>Google no longer allows sending via standard passwords (third-party/less secure apps).</li>
-                    <li>You <strong>must</strong> generate a 16-character <strong>App Password</strong> in your Google Account security settings.</li>
-                    <li>Make sure 2-Step Verification is enabled on your Gmail account to see the App Passwords option.</li>
-                  </ul>
-                </div>
-              </div>
-            )}
-
-            {/* Global Sender Identity (Required for both SMTP and Gmail) */}
-            <div className="settings-form-grid" style={{ marginBottom: 0 }}>
-              <div className="form-group">
-                <label className="form-label" htmlFor="smtp-sender-name">Sender Display Name</label>
-                <input
-                  id="smtp-sender-name"
-                  type="text"
-                  className="form-control"
-                  placeholder="e.g. Outreach Team"
-                  value={smtpSenderName}
-                  onChange={(e) => setSmtpSenderName(e.target.value)}
-                  disabled={savingSettings}
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label" htmlFor="smtp-sender-email">Sender Email Address</label>
-                <input
-                  id="smtp-sender-email"
-                  type="email"
-                  className="form-control"
-                  placeholder="e.g. outreach@mybusiness.com"
-                  value={activeService === 'gmail' ? smtpUsername : smtpSenderEmail}
-                  onChange={(e) => setSmtpSenderEmail(e.target.value)}
-                  disabled={savingSettings || activeService === 'gmail'}
-                  required
-                />
-                {activeService === 'gmail' && (
-                  <span style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '0.25rem', display: 'block' }}>
-                    🔒 Forced to your Gmail address for authentication compliance.
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '1.5rem' }}>
-              <button type="submit" className="btn btn-primary" disabled={savingSettings}>
-                {savingSettings ? 'Saving details...' : 'Save Configuration'}
-              </button>
-            </div>
-          </form>
-        </main>
-      )}
 
       {/* Draft Templates Tab */}
       {activeTab === 'templates' && (
@@ -3023,7 +2824,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
       {/* Bulk Outreach Modal */}
       {showBulkModal && (
-        <div className="modal-overlay">
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && !bulkSending) setShowBulkModal(false); }}>
           <div className="modal-content glass-panel bulk-modal-content animate-fade">
             <div className="modal-header">
               <h2 className="card-title" style={{ margin: 0 }}>Bulk Outreach Composer ({selectedCount} target leads)</h2>
@@ -3059,61 +2860,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                 </select>
               </div>
 
-              {/* Delivery Service Selection */}
-              <div className="form-group">
-                <label className="form-label">Delivery Service</label>
-                <div style={{ display: 'flex', gap: '1rem', marginTop: '0.25rem' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                    <input
-                      type="radio"
-                      name="bulk-email-service"
-                      checked={bulkService === 'smtp'}
-                      onChange={() => setBulkService('smtp')}
-                      disabled={bulkSending}
-                    />
-                    Autopilot (Saved Gmail/SMTP Settings)
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                    <input
-                      type="radio"
-                      name="bulk-email-service"
-                      checked={bulkService === 'gmail'}
-                      onChange={() => setBulkService('gmail')}
-                      disabled={bulkSending}
-                    />
-                    Gmail Override (Direct App Password)
-                  </label>
-                </div>
-              </div>
 
-              {bulkService === 'gmail' && (
-                <div className="glass-panel" style={{ padding: '1rem', marginBottom: '1.25rem', background: 'rgba(255,255,255,0.02)' }}>
-                  <div className="settings-form-grid" style={{ gap: '1rem', marginBottom: 0 }}>
-                    <div className="form-group" style={{ marginBottom: 0 }}>
-                      <label className="form-label" style={{ fontSize: '0.75rem' }}>Gmail Account</label>
-                      <input
-                        type="email"
-                        className="form-control"
-                        placeholder="user@gmail.com"
-                        value={bulkGmailUser}
-                        onChange={(e) => setBulkGmailUser(e.target.value)}
-                        disabled={bulkSending}
-                      />
-                    </div>
-                    <div className="form-group" style={{ marginBottom: 0 }}>
-                      <label className="form-label" style={{ fontSize: '0.75rem' }}>App Password</label>
-                      <input
-                        type="password"
-                        className="form-control"
-                        placeholder="xxxx xxxx xxxx xxxx"
-                        value={bulkGmailPass}
-                        onChange={(e) => setBulkGmailPass(e.target.value)}
-                        disabled={bulkSending}
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
 
               <div className="form-group" style={{ marginBottom: '1.25rem' }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-muted)' }}>

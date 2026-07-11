@@ -44,7 +44,6 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
     return Array.from(new Set(emails));
   });
 
-  const [service, setService] = useState<'smtp' | 'gmail'>('smtp');
   const [subject, setSubject] = useState(`Outreach Partnership Proposal — ${lead.website}`);
   const [body, setBody] = useState(
     `<p>Hello,</p>\n<p>I hope you are doing well.</p>\n<p>I visited your website <strong>${lead.website}</strong> and really liked your platform. I would love to connect and discuss potential partnership opportunities.</p>\n<p>Best regards,</p>\n<p>Sales Team</p>`
@@ -75,9 +74,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
     }
   };
 
-  // Custom Gmail config fields (if service is 'gmail')
-  const [gmailUser, setGmailUser] = useState('');
-  const [gmailPass, setGmailPass] = useState('');
+
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -95,13 +92,6 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
       return;
     }
 
-    if (service === 'gmail') {
-      if (!gmailUser || !gmailPass) {
-        setError('Please enter your Gmail address and App Password.');
-        return;
-      }
-    }
-
     setLoading(true);
     setError('');
 
@@ -113,8 +103,7 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
           recipientEmails: selectedRecipients,
           subject,
           body,
-          service,
-          gmailConfig: service === 'gmail' ? { user: gmailUser, pass: gmailPass } : undefined,
+          service: 'smtp', // Default to saved settings
           userId,
           disableTracking
         })
@@ -162,8 +151,14 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
   // Remove duplicates
   const uniqueEmailOptions = Array.from(new Set(emailOptions));
 
+  const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      onClose();
+    }
+  };
+
   return (
-    <div className="modal-overlay">
+    <div className="modal-overlay" onClick={handleOverlayClick}>
       <div className="modal-content glass-panel animate-fade">
         <div className="modal-header">
           <h2 className="card-title" style={{ margin: 0 }}>Outreach Composer: {lead.website}</h2>
@@ -183,63 +178,6 @@ export const OutreachComposer: React.FC<OutreachComposerProps> = ({ lead, userId
         )}
 
         <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label className="form-label">Delivery Service</label>
-            <div style={{ display: 'flex', gap: '1rem', marginTop: '0.25rem' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="email-service"
-                  checked={service === 'smtp'}
-                  onChange={() => setService('smtp')}
-                  disabled={loading}
-                />
-                Autopilot (Saved Settings)
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                <input
-                  type="radio"
-                  name="email-service"
-                  checked={service === 'gmail'}
-                  onChange={() => setService('gmail')}
-                  disabled={loading}
-                />
-                Gmail (Direct SMTP Relay)
-              </label>
-            </div>
-          </div>
-
-          {service === 'gmail' && (
-            <div className="glass-panel" style={{ padding: '1rem', marginBottom: '1.25rem', background: 'rgba(255,255,255,0.02)' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" style={{ fontSize: '0.75rem' }}>Gmail Account</label>
-                  <input
-                    type="email"
-                    className="form-control"
-                    placeholder="user@gmail.com"
-                    value={gmailUser}
-                    onChange={(e) => setGmailUser(e.target.value)}
-                    disabled={loading}
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" style={{ fontSize: '0.75rem' }}>App Password</label>
-                  <input
-                    type="password"
-                    className="form-control"
-                    placeholder="xxxx xxxx xxxx xxxx"
-                    value={gmailPass}
-                    onChange={(e) => setGmailPass(e.target.value)}
-                    disabled={loading}
-                  />
-                </div>
-              </div>
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.5rem', display: 'block' }}>
-                *Requires a Gmail Google App Password generated in security settings.
-              </span>
-            </div>
-          )}
 
           <div className="form-group">
             <label className="form-label">Recipient Emails</label>

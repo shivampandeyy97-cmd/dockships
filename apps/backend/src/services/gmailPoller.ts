@@ -68,7 +68,77 @@ export async function pollGmailReplies() {
             const recipient = email.recipient_email.trim().toLowerCase();
             const sentTime = new Date(email.sent_at).getTime();
 
-            // Search for messages FROM the recipient
+            // 1. Search for bounces (mailer-daemon)
+            const bounces = await client.search({
+              from: 'mailer-daemon@googlemail.com'
+            });
+            const bounces2 = await client.search({
+              from: 'mailer-daemon@gmail.com'
+            });
+            const allBounces = Array.from(new Set([...(bounces || []), ...(bounces2 || [])]));
+
+            let bounceDetected = false;
+            for (const seq of allBounces) {
+              const fetchResult = await client.fetchOne(seq, { envelope: true, source: true });
+              if (fetchResult && fetchResult.envelope) {
+                const messageDate = fetchResult.envelope.date 
+                  ? new Date(fetchResult.envelope.date).getTime() 
+                  : 0;
+                
+                if (messageDate > sentTime && fetchResult.source) {
+                  const content = fetchResult.source.toString().toLowerCase();
+                  if (content.includes(recipient)) {
+                    console.log(`🚫 [Gmail Poller] Found reply failure bounce-back for ${recipient}!`);
+                    const now = new Date().toISOString();
+                    
+                    // Update email status in SQLite
+                    await runQuery(
+                      "UPDATE dockships_emails SET status = 'bounced', reverted_at = ?, bounce_reason = 'Delivery failure bounce back detected' WHERE id = ?",
+                      [now, email.id]
+                    );
+
+                    // Update lead status in SQLite
+                    await runQuery(
+                      "UPDATE dockships_leads SET status = 'bounced' WHERE id = ?",
+                      [email.lead_id]
+                    );
+
+                    // Log event
+                    const eventId = crypto.randomUUID();
+                    await runQuery(
+                      `INSERT INTO dockships_email_events (id, email_id, event_type, event_time, metadata) 
+                       VALUES (?, ?, 'bounced', ?, ?)`,
+                      [
+                        eventId, 
+                        email.id, 
+                        now, 
+                        JSON.stringify({ 
+                          source: 'gmail_imap_poller_bounce', 
+                          subject: fetchResult.envelope.subject, 
+                          messageId: fetchResult.envelope.messageId 
+                        })
+                      ]
+                    );
+
+                    // Send Slack notification
+                    await sendSlackAlert(
+                      'Outreach Bounce',
+                      `Email sent to *${recipient}* for lead *${email.website}* bounced!`,
+                      'error'
+                    );
+                    
+                    bounceDetected = true;
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (bounceDetected) {
+              continue; // Move to next email recipient
+            }
+
+            // 2. Search for messages FROM the recipient (replies)
             const messages = await client.search({
               from: recipient
             });

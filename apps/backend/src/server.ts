@@ -383,14 +383,14 @@ app.post('/api/leads', async (req, res) => {
 
 // BULK CREATE leads (from CSV import)
 app.post('/api/leads/bulk', async (req, res) => {
-  const { leads } = req.body; // Array of { website, email, pocName }
+  const { leads } = req.body; // Array of { website, email, pocName, domainStatus, adsTxtStatus }
   if (!leads || !Array.isArray(leads)) {
     return res.status(400).json({ error: 'Leads array is required.' });
   }
 
   const results = [];
   for (const item of leads) {
-    const { website, email, pocName } = item;
+    const { website, email, pocName, domainStatus, adsTxtStatus } = item;
     if (!website) continue;
     try {
       const cleanUrl = website.trim().replace(/^https?:\/\//i, '');
@@ -404,21 +404,31 @@ app.post('/api/leads/bulk', async (req, res) => {
         continue;
       }
 
+      const ds = domainStatus || 'pending';
+      const ats = adsTxtStatus || 'pending';
+      const currentStatus = ds === 'pending' ? 'pending' : 'crawled';
+
       await runQuery(
         `INSERT INTO dockships_leads (
           id, website, manual_email, fetched_emails, domain_status, 
           ads_txt_status, ads_detected, contact_form_status, linkedin_status, status, poc_name
          )
-         VALUES (?, ?, ?, '[]', 'pending', 'pending', 'pending', 'pending', 'pending', 'pending', ?)`,
+         VALUES (?, ?, ?, '[]', ?, ?, ?, 'pending', 'pending', ?, ?)`,
         [
           leadId,
           cleanUrl,
           email ? email.trim() : null,
+          ds,
+          ats,
+          ats === 'present' ? 'present' : 'pending',
+          currentStatus,
           pocName ? pocName.trim() : null
         ]
       );
 
-      runBackgroundCrawl(leadId, cleanUrl);
+      if (ds === 'pending') {
+        runBackgroundCrawl(leadId, cleanUrl);
+      }
       results.push({ website, status: 'created', id: leadId });
     } catch (err: any) {
       results.push({ website, status: 'failed', error: err.message });
@@ -902,6 +912,20 @@ app.delete('/api/drafts/:id', async (req, res) => {
   }
 });
 
+interface BulkEmailJob {
+  id: string;
+  total: number;
+  current: number;
+  succeeded: number;
+  failed: number;
+  status: 'processing' | 'completed' | 'failed';
+  error?: string;
+  results: Array<{ leadId: string; website: string; success: boolean; error?: string }>;
+}
+
+const bulkEmailJobs: Record<string, BulkEmailJob> = {};
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 // POST Bulk email sending
 app.post('/api/leads/bulk-email', async (req, res) => {
   const { leadIds, subject, body, service, gmailConfig, userId, disableTracking } = req.body;
@@ -913,84 +937,130 @@ app.post('/api/leads/bulk-email', async (req, res) => {
     return res.status(400).json({ error: 'Subject, body, and user credentials are required.' });
   }
 
-  const results: Array<{ leadId: string; website: string; success: boolean; error?: string }> = [];
+  const jobId = crypto.randomUUID();
+  bulkEmailJobs[jobId] = {
+    id: jobId,
+    total: leadIds.length,
+    current: 0,
+    succeeded: 0,
+    failed: 0,
+    status: 'processing',
+    results: []
+  };
 
   try {
     const backendUrl = req.protocol + '://' + req.get('host');
 
-    for (const leadId of leadIds) {
-      try {
-        const lead = await getRow<any>('SELECT * FROM dockships_leads WHERE id = ?', [leadId]);
-        if (!lead) {
-          results.push({ leadId, website: 'Unknown', success: false, error: 'Lead not found.' });
-          continue;
+    // Start background processing
+    setImmediate(async () => {
+      for (const leadId of leadIds) {
+        try {
+          const job = bulkEmailJobs[jobId];
+          if (!job) break; // Job was removed
+
+          const lead = await getRow<any>('SELECT * FROM dockships_leads WHERE id = ?', [leadId]);
+          if (!lead) {
+            job.results.push({ leadId, website: 'Unknown', success: false, error: 'Lead not found.' });
+            job.failed++;
+            job.current++;
+            continue;
+          }
+
+          const emailsList = JSON.parse(lead.fetched_emails || '[]');
+          const recipient = lead.manual_email || (emailsList.length > 0 ? emailsList[0] : null);
+
+          if (!recipient) {
+            job.results.push({ leadId, website: lead.website, success: false, error: 'No recipient email found.' });
+            job.failed++;
+            job.current++;
+            continue;
+          }
+
+          const pocName = lead.poc_name || 'Team';
+
+          let replacedSubject = subject
+            .replace(/\{\{website\}\}/g, lead.website)
+            .replace(/\{\{poc\}\}/g, pocName);
+          let replacedBody = body
+            .replace(/\{\{website\}\}/g, lead.website)
+            .replace(/\{\{poc\}\}/g, pocName);
+
+          const logId = crypto.randomUUID();
+
+          // 1. Rewrite HTML links inside the email body for click tracking
+          if (!disableTracking) {
+            replacedBody = replacedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
+              if (url.startsWith('http')) {
+                return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
+              }
+              return match;
+            });
+          }
+
+          // 2. Append open tracking pixel
+          const htmlWithPixel = disableTracking 
+            ? replacedBody 
+            : replacedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
+
+          const mailResult = await sendOutreachEmail({
+            to: recipient.trim(),
+            subject: replacedSubject.trim(),
+            body: htmlWithPixel,
+            service,
+            gmailConfig
+          }, userId);
+
+          if (!mailResult.success) {
+            job.results.push({ leadId, website: lead.website, success: false, error: mailResult.error || 'Outreach dispatch failed.' });
+            job.failed++;
+            job.current++;
+            continue;
+          }
+
+          await runQuery(
+            `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status)
+             VALUES (?, ?, ?, ?, ?, 'sent')`,
+            [logId, leadId, recipient.trim(), replacedSubject.trim(), replacedBody]
+          );
+
+          await runQuery("UPDATE dockships_leads SET status = 'outreach_sent' WHERE id = ?", [leadId]);
+
+          job.results.push({ leadId, website: lead.website, success: true });
+          job.succeeded++;
+          job.current++;
+        } catch (innerErr: any) {
+          const job = bulkEmailJobs[jobId];
+          if (job) {
+            job.results.push({ leadId, website: 'Unknown', success: false, error: innerErr.message });
+            job.failed++;
+            job.current++;
+          }
         }
-
-        const emailsList = JSON.parse(lead.fetched_emails || '[]');
-        const recipient = lead.manual_email || (emailsList.length > 0 ? emailsList[0] : null);
-
-        if (!recipient) {
-          results.push({ leadId, website: lead.website, success: false, error: 'No recipient email found.' });
-          continue;
-        }
-
-        const pocName = lead.poc_name || 'Team';
-
-        let replacedSubject = subject
-          .replace(/\{\{website\}\}/g, lead.website)
-          .replace(/\{\{poc\}\}/g, pocName);
-        let replacedBody = body
-          .replace(/\{\{website\}\}/g, lead.website)
-          .replace(/\{\{poc\}\}/g, pocName);
-
-        const logId = crypto.randomUUID();
-
-        // 1. Rewrite HTML links inside the email body for click tracking
-        if (!disableTracking) {
-          replacedBody = replacedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
-            if (url.startsWith('http')) {
-              return `href="${backendUrl}/api/emails/click/${logId}?url=${encodeURIComponent(url)}"`;
-            }
-            return match;
-          });
-        }
-
-        // 2. Append open tracking pixel
-        const htmlWithPixel = disableTracking 
-          ? replacedBody 
-          : replacedBody + `<img src="${backendUrl}/api/emails/track/${logId}" width="1" height="1" style="display:none;" alt="" />`;
-
-        const mailResult = await sendOutreachEmail({
-          to: recipient.trim(),
-          subject: replacedSubject.trim(),
-          body: htmlWithPixel,
-          service,
-          gmailConfig
-        }, userId);
-
-        if (!mailResult.success) {
-          results.push({ leadId, website: lead.website, success: false, error: mailResult.error || 'Outreach dispatch failed.' });
-          continue;
-        }
-
-        await runQuery(
-          `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status)
-           VALUES (?, ?, ?, ?, ?, 'sent')`,
-          [logId, leadId, recipient.trim(), replacedSubject.trim(), replacedBody]
-        );
-
-        await runQuery("UPDATE dockships_leads SET status = 'outreach_sent' WHERE id = ?", [leadId]);
-
-        results.push({ leadId, website: lead.website, success: true });
-      } catch (innerErr: any) {
-        results.push({ leadId, website: 'Unknown', success: false, error: innerErr.message });
+        
+        // Wait 500ms between sends to avoid rate limits
+        await sleep(500);
       }
-    }
 
-    return res.json({ success: true, results });
+      const job = bulkEmailJobs[jobId];
+      if (job) {
+        job.status = 'completed';
+      }
+    });
+
+    return res.json({ success: true, jobId });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Internal bulk outreach error.' });
   }
+});
+
+// GET Status of Bulk email sending job
+app.get('/api/leads/bulk-email/status/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  const job = bulkEmailJobs[jobId];
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found.' });
+  }
+  return res.json(job);
 });
 
 
