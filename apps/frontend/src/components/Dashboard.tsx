@@ -83,6 +83,9 @@ interface Seller {
   is_deleted?: number;
   domain_status?: string;
   ads_txt_status?: string;
+  ads_detected?: string;
+  fetched_emails?: string;
+  best_email?: string;
   crawled_at?: string;
   created_at: string;
 }
@@ -547,6 +550,9 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       'Business Domain',
       'Is Live',
       'ads.txt Status',
+      'Ads Detected',
+      'Best Email',
+      'Fetched Emails',
       'Crawled At'
     ];
 
@@ -566,15 +572,27 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         return res.json();
       })
       .then(data => {
-        const rows = data.sellers.map((s: any) => [
-          s.seller_id || '',
-          s.name || '',
-          s.seller_type || '',
-          s.domain,
-          s.domain_status || 'pending',
-          s.ads_txt_status || 'pending',
-          s.crawled_at || ''
-        ]);
+        const rows = data.sellers.map((s: any) => {
+          let emailsListStr = '';
+          try {
+            const parsed = JSON.parse(s.fetched_emails || '[]');
+            emailsListStr = Array.isArray(parsed) ? parsed.join('; ') : '';
+          } catch (e) {
+            emailsListStr = '';
+          }
+          return [
+            s.seller_id || '',
+            s.name || '',
+            s.seller_type || '',
+            s.domain,
+            s.domain_status || 'pending',
+            s.ads_txt_status || 'pending',
+            s.ads_detected || 'pending',
+            s.best_email || '',
+            emailsListStr,
+            s.crawled_at || ''
+          ];
+        });
 
         const csvContent = [
           headers.join(','),
@@ -2726,6 +2744,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                           <th>Business Domain</th>
                           <th>Is Live (Domain)</th>
                           <th>ads.txt Status</th>
+                          <th>Ads Detected</th>
+                          <th>Contact Info</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2765,6 +2785,63 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                               ) : (
                                 <span className="badge badge-secondary">Pending</span>
                               )}
+                            </td>
+                            {/* Ads Detected Column */}
+                            <td>
+                              {s.ads_detected && s.ads_detected !== 'none' && s.ads_detected !== 'no' && s.ads_detected !== 'pending' ? (
+                                <span className="badge badge-primary" style={{ fontSize: '0.78rem', padding: '0.2rem 0.5rem', whiteSpace: 'normal', maxWidth: '180px', display: 'inline-block', textAlign: 'left' }}>
+                                  {s.ads_detected.startsWith('yes (') ? s.ads_detected.replace('yes (', '').replace(')', '') : s.ads_detected}
+                                </span>
+                              ) : s.ads_detected === 'no' || s.ads_detected === 'none' ? (
+                                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No</span>
+                              ) : (
+                                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic' }}>Pending</span>
+                              )}
+                            </td>
+                            {/* Contact Info Column */}
+                            <td>
+                              {s.best_email && (
+                                <div style={{ marginBottom: '0.35rem' }}>
+                                  <span style={{ fontSize: '0.72rem', color: '#22c55e', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: '4px', padding: '0.15rem 0.4rem', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                                    ✅ <strong>{s.best_email}</strong>
+                                  </span>
+                                </div>
+                              )}
+                              
+                              {(() => {
+                                let emailsList: string[] = [];
+                                try {
+                                  emailsList = JSON.parse(s.fetched_emails || '[]');
+                                } catch (e) {
+                                  emailsList = [];
+                                }
+                                const otherEmails = emailsList.filter(e => e !== s.best_email);
+                                if (otherEmails.length === 0) return s.best_email ? null : <span style={{ opacity: 0.5, fontSize: '0.85rem' }}>None</span>;
+                                
+                                return (
+                                  <div className="email-tags" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginTop: '0.25rem' }}>
+                                    {otherEmails.map((email) => (
+                                      <span 
+                                        key={email} 
+                                        className="email-tag" 
+                                        style={{ 
+                                          fontSize: '0.7rem',
+                                          display: 'inline-flex', 
+                                          alignItems: 'center', 
+                                          gap: '0.25rem',
+                                          background: 'rgba(99, 102, 241, 0.1)', 
+                                          borderColor: 'rgba(99, 102, 241, 0.2)',
+                                          padding: '0.1rem 0.3rem',
+                                          borderRadius: '3px',
+                                          border: '1px solid rgba(99, 102, 241, 0.2)'
+                                        }}
+                                      >
+                                        {email}
+                                      </span>
+                                    ))}
+                                  </div>
+                                );
+                              })()}
                             </td>
                           </tr>
                         ))}

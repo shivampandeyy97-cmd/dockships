@@ -1409,21 +1409,49 @@ async function crawlSellersBackground(companyDomain: string) {
         const cleanDomain = seller.domain ? seller.domain.trim() : '';
         if (!cleanDomain || cleanDomain === 'none') {
           await runQuery(
-            "UPDATE dockships_sellers SET domain_status = 'failed', ads_txt_status = 'not present', crawled_at = datetime('now') WHERE id = ?",
+            `UPDATE dockships_sellers 
+             SET domain_status = 'failed', 
+                 ads_txt_status = 'not present', 
+                 ads_detected = 'none', 
+                 fetched_emails = '[]', 
+                 best_email = NULL, 
+                 crawled_at = datetime('now') 
+             WHERE id = ?`,
             [seller.id]
           );
           return;
         }
 
         try {
-          const res = await checkSellerDomain(cleanDomain);
+          const res = await crawlWebsite(cleanDomain);
           await runQuery(
-            "UPDATE dockships_sellers SET domain_status = ?, ads_txt_status = ?, crawled_at = datetime('now') WHERE id = ?",
-            [res.domainStatus, res.adsTxtStatus, seller.id]
+            `UPDATE dockships_sellers 
+             SET domain_status = ?, 
+                 ads_txt_status = ?, 
+                 ads_detected = ?, 
+                 fetched_emails = ?, 
+                 best_email = ?, 
+                 crawled_at = datetime('now') 
+             WHERE id = ?`,
+            [
+              res.domainStatus,
+              res.adsTxtStatus,
+              res.adsDetected,
+              JSON.stringify(res.emails),
+              res.bestEmail || null,
+              seller.id
+            ]
           );
         } catch (err) {
           await runQuery(
-            "UPDATE dockships_sellers SET domain_status = 'failed', ads_txt_status = 'not present', crawled_at = datetime('now') WHERE id = ?",
+            `UPDATE dockships_sellers 
+             SET domain_status = 'failed', 
+                 ads_txt_status = 'not present', 
+                 ads_detected = 'none', 
+                 fetched_emails = '[]', 
+                 best_email = NULL, 
+                 crawled_at = datetime('now') 
+             WHERE id = ?`,
             [seller.id]
           );
         }
@@ -1439,7 +1467,6 @@ async function crawlSellersBackground(companyDomain: string) {
   }
 }
 
-// Fetch sellers.json and parse it
 app.post('/api/sellers/fetch', async (req, res) => {
   const { companyDomain } = req.body;
   if (!companyDomain) {
@@ -1586,9 +1613,9 @@ app.get('/api/sellers', async (req, res) => {
     const params: any[] = [domain];
 
     if (search) {
-      filterQuery += ' AND (domain LIKE ? OR name LIKE ? OR seller_id LIKE ?)';
+      filterQuery += ' AND (domain LIKE ? OR name LIKE ? OR seller_id LIKE ? OR best_email LIKE ? OR ads_detected LIKE ?)';
       const searchParam = `%${String(search).trim()}%`;
-      params.push(searchParam, searchParam, searchParam);
+      params.push(searchParam, searchParam, searchParam, searchParam, searchParam);
     }
 
     if (domainStatus !== 'all') {

@@ -68,8 +68,8 @@ function isParkingOrSalePage(html: string, title: string): boolean {
   return triggers.some(trigger => lowercaseHtml.includes(trigger) || lowercaseTitle.includes(trigger));
 }
 
-// Check ads.txt page
-export async function checkAdsTxt(baseUrl: string): Promise<'present' | 'not present'> {
+// Check ads.txt page and get its content if present
+export async function getAdsTxtContent(baseUrl: string): Promise<{ status: 'present' | 'not present'; body: string }> {
   try {
     const adsTxtUrl = new URL('/ads.txt', baseUrl).toString();
     const response = await axios.get(adsTxtUrl, {
@@ -81,46 +81,102 @@ export async function checkAdsTxt(baseUrl: string): Promise<'present' | 'not pre
     const body = String(response.data || '');
     // ads.txt should contain publisher listings
     if (body.includes('direct') || body.includes('reseller') || /pub-[0-9]+/i.test(body)) {
-      return 'present';
+      return { status: 'present', body };
     }
-    return 'not present';
+    return { status: 'not present', body: '' };
   } catch (err) {
-    return 'not present';
+    return { status: 'not present', body: '' };
   }
 }
 
-// Detect ad networks present in page HTML
-function detectAds(html: string): string {
+// Check ads.txt page (backward compatibility wrapper)
+export async function checkAdsTxt(baseUrl: string): Promise<'present' | 'not present'> {
+  const res = await getAdsTxtContent(baseUrl);
+  return res.status;
+}
+
+// Detect ad networks present in page HTML and ads.txt content
+function detectAds(html: string, adsTxtBody: string = ''): string {
   const lowercaseHtml = html.toLowerCase();
+  const lowercaseAdsTxt = adsTxtBody.toLowerCase();
   const adsFound: string[] = [];
 
-  if (lowercaseHtml.includes('googlesyndication.com') || lowercaseHtml.includes('adsbygoogle') || lowercaseHtml.includes('google_ad')) {
+  if (
+    lowercaseHtml.includes('googlesyndication.com') || 
+    lowercaseHtml.includes('adsbygoogle') || 
+    lowercaseHtml.includes('google_ad') ||
+    lowercaseAdsTxt.includes('google.com')
+  ) {
     adsFound.push('Google AdSense');
   }
-  if (lowercaseHtml.includes('securepubads.g.doubleclick.net') || lowercaseHtml.includes('googletag')) {
+  if (
+    lowercaseHtml.includes('securepubads.g.doubleclick.net') || 
+    lowercaseHtml.includes('googletag') ||
+    lowercaseAdsTxt.includes('doubleclick.net')
+  ) {
     adsFound.push('DoubleClick/GPT');
   }
-  if (lowercaseHtml.includes('taboola.com') || lowercaseHtml.includes('tb-default')) {
+  if (
+    lowercaseHtml.includes('taboola.com') || 
+    lowercaseHtml.includes('tb-default') ||
+    lowercaseAdsTxt.includes('taboola.com')
+  ) {
     adsFound.push('Taboola');
   }
-  if (lowercaseHtml.includes('outbrain.com') || lowercaseHtml.includes('outbrain_widget')) {
+  if (
+    lowercaseHtml.includes('outbrain.com') || 
+    lowercaseHtml.includes('outbrain_widget') ||
+    lowercaseAdsTxt.includes('outbrain.com')
+  ) {
     adsFound.push('Outbrain');
   }
-  if (lowercaseHtml.includes('prebid.js') || lowercaseHtml.includes('pbjs')) {
+  if (
+    lowercaseHtml.includes('prebid.js') || 
+    lowercaseHtml.includes('pbjs') ||
+    lowercaseAdsTxt.includes('prebid')
+  ) {
     adsFound.push('Prebid');
   }
-  if (lowercaseHtml.includes('ezoic.net') || lowercaseHtml.includes('ezod')) {
+  if (
+    lowercaseHtml.includes('ezoic.net') || 
+    lowercaseHtml.includes('ezod') ||
+    lowercaseAdsTxt.includes('ezoic.com') ||
+    lowercaseAdsTxt.includes('ezoic.net')
+  ) {
     adsFound.push('Ezoic');
   }
-  if (lowercaseHtml.includes('medianet') || lowercaseHtml.includes('media.net')) {
+  if (
+    lowercaseHtml.includes('medianet') || 
+    lowercaseHtml.includes('media.net') ||
+    lowercaseAdsTxt.includes('media.net')
+  ) {
     adsFound.push('Media.net');
   }
-  if (lowercaseHtml.includes('criteo.js') || lowercaseHtml.includes('criteo')) {
+  if (
+    lowercaseHtml.includes('criteo.js') || 
+    lowercaseHtml.includes('criteo') ||
+    lowercaseAdsTxt.includes('criteo.com')
+  ) {
     adsFound.push('Criteo');
+  }
+  if (lowercaseAdsTxt.includes('pubmatic.com')) {
+    adsFound.push('Pubmatic');
+  }
+  if (lowercaseAdsTxt.includes('rubiconproject.com')) {
+    adsFound.push('Rubicon');
+  }
+  if (lowercaseAdsTxt.includes('adnxs.com') || lowercaseAdsTxt.includes('appnexus.com')) {
+    adsFound.push('AppNexus');
+  }
+  if (lowercaseAdsTxt.includes('openx.com')) {
+    adsFound.push('OpenX');
+  }
+  if (lowercaseAdsTxt.includes('indexexchange.com')) {
+    adsFound.push('Index Exchange');
   }
 
   if (adsFound.length > 0) {
-    return `yes (${adsFound.join(', ')})`;
+    return `yes (${Array.from(new Set(adsFound)).join(', ')})`;
   }
   return 'no';
 }
@@ -254,8 +310,9 @@ export async function crawlWebsite(targetUrl: string): Promise<CrawlResult> {
   }
 
   // 2. Run validations on homepage
-  const adsTxtStatus = await checkAdsTxt(resolvedUrl);
-  const adsDetected = detectAds(html);
+  const adsTxtRes = await getAdsTxtContent(resolvedUrl);
+  const adsTxtStatus = adsTxtRes.status;
+  const adsDetected = detectAds(html, adsTxtRes.body);
   const linkedinStatus = extractLinkedInLink(html, $) as 'working' | 'none';
 
   // 3. Extract emails from homepage

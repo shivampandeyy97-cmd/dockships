@@ -243,6 +243,9 @@ export async function initializeSchema(): Promise<void> {
         is_deleted INTEGER DEFAULT 0,
         domain_status TEXT DEFAULT 'pending',
         ads_txt_status TEXT DEFAULT 'pending',
+        ads_detected TEXT DEFAULT 'pending',
+        fetched_emails TEXT DEFAULT '[]',
+        best_email TEXT,
         crawled_at TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         UNIQUE(company_domain, domain)
@@ -312,6 +315,9 @@ async function runMigrations() {
         is_deleted INTEGER DEFAULT 0,
         domain_status TEXT DEFAULT 'pending',
         ads_txt_status TEXT DEFAULT 'pending',
+        ads_detected TEXT DEFAULT 'pending',
+        fetched_emails TEXT DEFAULT '[]',
+        best_email TEXT,
         crawled_at TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         UNIQUE(company_domain, domain)
@@ -321,6 +327,11 @@ async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_dockships_sellers_company_domain ON dockships_sellers(company_domain);
     `);
   } catch (e) {}
+
+  // Migrate existing sellers tables to include new columns if they don't have them
+  try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN ads_detected TEXT DEFAULT 'pending';"); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN fetched_emails TEXT DEFAULT '[]';"); } catch (e) {}
+  try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN best_email TEXT;"); } catch (e) {}
 }
 
 async function seedDefaultData() {
