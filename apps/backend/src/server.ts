@@ -317,8 +317,16 @@ app.get('/api/leads', async (req, res) => {
       crawled_at?: string;
       poc_name?: string;
       created_at: string;
+      sellers_companies?: string;
     }
-    const leads = await allRows<LeadRow>('SELECT * FROM dockships_leads ORDER BY created_at DESC');
+    const leads = await allRows<LeadRow>(`
+      SELECT l.*, 
+             (SELECT group_concat(DISTINCT company_domain) 
+              FROM dockships_sellers 
+              WHERE REPLACE(REPLACE(LOWER(domain), 'www.', ''), 'http://', '') = REPLACE(REPLACE(LOWER(l.website), 'www.', ''), 'http://', '')) as sellers_companies
+      FROM dockships_leads l
+      ORDER BY l.created_at DESC
+    `);
     
     const parsedLeads = leads.map(lead => ({
       ...lead,

@@ -23,6 +23,7 @@ interface Lead {
   crawled_at?: string;
   poc_name?: string;
   created_at: string;
+  sellers_companies?: string;
 }
 
 interface EmailLog {
@@ -294,6 +295,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [adsFilter, setAdsFilter] = useState<'all' | 'yes' | 'no'>('all');
   const [contactFilter, setContactFilter] = useState<'all' | 'email found' | 'contact form available' | 'none'>('all');
   const [linkedinFilter, setLinkedinFilter] = useState<'all' | 'working' | 'none'>('all');
+  const [sellersCompanyFilter, setSellersCompanyFilter] = useState<string>('all');
+  const [emailValidationFilter, setEmailValidationFilter] = useState<string>('all');
 
   // Email stats states
   const [emailStats, setEmailStats] = useState<EmailStats | null>(null);
@@ -343,6 +346,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       }
       if (contactFilter !== 'all' && lead.contact_form_status !== contactFilter) return false;
       if (linkedinFilter !== 'all' && lead.linkedin_status !== linkedinFilter) return false;
+      
+      // Sellers Company Filter
+      if (sellersCompanyFilter !== 'all') {
+        const companies = lead.sellers_companies
+          ? lead.sellers_companies.split(',').map((c: string) => c.trim().toLowerCase())
+          : [];
+        if (!companies.includes(sellersCompanyFilter.toLowerCase())) return false;
+      }
+      
+      // Email ID Live Status Filter
+      if (emailValidationFilter !== 'all') {
+        const validationStatus = lead.email_validation_status || 'pending';
+        if (validationStatus !== emailValidationFilter) return false;
+      }
+      
       return true;
     });
 
@@ -360,6 +378,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       'Contact Form Status',
       'Best Email',
       'Fetched Emails',
+      'Email ID Live Status',
       'LinkedIn Status',
       'Outreach Status',
       'Crawled At',
@@ -375,6 +394,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       lead.contact_form_status || 'pending',
       lead.best_email || '',
       (lead.fetched_emails || []).join('; '),
+      lead.email_validation_status || 'pending',
       lead.linkedin_status || 'pending',
       lead.status || 'pending',
       lead.crawled_at || '',
@@ -1571,8 +1591,41 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                     </select>
                   </div>
 
+                  {/* Sellers.json Company Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Sellers.json Company</label>
+                    <select 
+                      value={sellersCompanyFilter} 
+                      onChange={(e: any) => setSellersCompanyFilter(e.target.value)}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '180px', height: '30px' }}
+                    >
+                      <option value="all">All Companies</option>
+                      {crawledCompanies.map((company) => (
+                        <option key={company} value={company}>
+                          {company}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Email ID Live Status Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Email ID Live Status</label>
+                    <select 
+                      value={emailValidationFilter} 
+                      onChange={(e: any) => setEmailValidationFilter(e.target.value)}
+                      className="form-control"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.85rem', width: '150px', height: '30px' }}
+                    >
+                      <option value="all">All Statuses</option>
+                      <option value="valid">Valid</option>
+                      <option value="pending">Pending</option>
+                    </select>
+                  </div>
+
                   {/* Clear Button */}
-                  {(domainFilter !== 'all' || adsTxtFilter !== 'all' || adsFilter !== 'all' || contactFilter !== 'all' || linkedinFilter !== 'all') && (
+                  {(domainFilter !== 'all' || adsTxtFilter !== 'all' || adsFilter !== 'all' || contactFilter !== 'all' || linkedinFilter !== 'all' || sellersCompanyFilter !== 'all' || emailValidationFilter !== 'all') && (
                     <button 
                       onClick={() => {
                         setDomainFilter('all');
@@ -1580,6 +1633,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                         setAdsFilter('all');
                         setContactFilter('all');
                         setLinkedinFilter('all');
+                        setSellersCompanyFilter('all');
+                        setEmailValidationFilter('all');
                       }}
                       className="btn btn-secondary"
                       style={{ padding: '0.25rem 0.75rem', fontSize: '0.8rem', height: '30px', alignSelf: 'flex-end' }}
@@ -1611,6 +1666,21 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                   }
                   if (contactFilter !== 'all' && lead.contact_form_status !== contactFilter) return false;
                   if (linkedinFilter !== 'all' && lead.linkedin_status !== linkedinFilter) return false;
+                  
+                  // Sellers Company Filter
+                  if (sellersCompanyFilter !== 'all') {
+                    const companies = lead.sellers_companies
+                      ? lead.sellers_companies.split(',').map((c: string) => c.trim().toLowerCase())
+                      : [];
+                    if (!companies.includes(sellersCompanyFilter.toLowerCase())) return false;
+                  }
+
+                  // Email ID Live Status Filter
+                  if (emailValidationFilter !== 'all') {
+                    const validationStatus = lead.email_validation_status || 'pending';
+                    if (validationStatus !== emailValidationFilter) return false;
+                  }
+
                   return true;
                 });
 
@@ -1652,6 +1722,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                           <th>ads.txt</th>
                           <th>Ads Appearing</th>
                           <th>Contact Info</th>
+                          <th>Email ID Live Status</th>
                           <th>LinkedIn</th>
                           <th>Status / Outreach</th>
                           <th style={{ textAlign: 'right' }}>Actions</th>
@@ -1911,6 +1982,26 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                                     +
                                   </button>
                                 </div>
+                              </td>
+
+                              {/* Email ID Live Status */}
+                              <td>
+                                {lead.email_validation_status === 'valid' ? (
+                                  <span className="badge badge-success">
+                                    <span style={{ 
+                                      width: '6px', 
+                                      height: '6px', 
+                                      borderRadius: '50%', 
+                                      background: '#10b981', 
+                                      display: 'inline-block', 
+                                      marginRight: '4px',
+                                      animation: 'pulse-dot 1.5s infinite' 
+                                    }}></span>
+                                    Valid
+                                  </span>
+                                ) : (
+                                  <span className="badge badge-secondary">Pending</span>
+                                )}
                               </td>
 
                               {/* LinkedIn */}
