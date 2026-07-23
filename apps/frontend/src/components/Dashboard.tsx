@@ -206,6 +206,21 @@ function parseCSV(text: string) {
   return parsedLeads;
 }
 
+function safeParseEmails(emailsInput: any): string[] {
+  if (!emailsInput) return [];
+  if (Array.isArray(emailsInput)) return emailsInput;
+  if (typeof emailsInput === 'string') {
+    try {
+      const parsed = JSON.parse(emailsInput);
+      if (Array.isArray(parsed)) return parsed;
+      return emailsInput.trim() ? [emailsInput.trim()] : [];
+    } catch {
+      return emailsInput.trim() ? [emailsInput.trim()] : [];
+    }
+  }
+  return [];
+}
+
 export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'templates' | 'agent' | 'sellers'>('leads');
 
@@ -393,7 +408,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       lead.ads_detected || 'pending',
       lead.contact_form_status || 'pending',
       lead.best_email || '',
-      (lead.fetched_emails || []).join('; '),
+      safeParseEmails(lead.fetched_emails).join('; '),
       lead.email_validation_status || 'pending',
       lead.linkedin_status || 'pending',
       lead.status || 'pending',
@@ -593,13 +608,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       })
       .then(data => {
         const rows = data.sellers.map((s: any) => {
-          let emailsListStr = '';
-          try {
-            const parsed = JSON.parse(s.fetched_emails || '[]');
-            emailsListStr = Array.isArray(parsed) ? parsed.join('; ') : '';
-          } catch (e) {
-            emailsListStr = '';
-          }
+          const emailsListStr = safeParseEmails(s.fetched_emails).join('; ');
           return [
             s.seller_id || '',
             s.name || '',
@@ -1277,7 +1286,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
   const emailsCollected = leads.reduce((acc, lead) => {
     const list = new Set([
       ...(lead.manual_email ? [lead.manual_email] : []),
-      ...(lead.fetched_emails || [])
+      ...safeParseEmails(lead.fetched_emails)
     ]);
     return acc + list.size;
   }, 0);
@@ -1732,7 +1741,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                         {filteredLeads.map((lead) => {
                           const emailsList = Array.from(new Set([
                             ...(lead.manual_email ? [lead.manual_email] : []),
-                            ...(lead.fetched_emails || [])
+                            ...safeParseEmails(lead.fetched_emails)
                           ]));
                           const isCrawling = crawlingIds[lead.id];
 
@@ -2900,12 +2909,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
                               )}
                               
                               {(() => {
-                                let emailsList: string[] = [];
-                                try {
-                                  emailsList = JSON.parse(s.fetched_emails || '[]');
-                                } catch (e) {
-                                  emailsList = [];
-                                }
+                                const emailsList = safeParseEmails(s.fetched_emails);
                                 const otherEmails = emailsList.filter(e => e !== s.best_email);
                                 if (otherEmails.length === 0) return s.best_email ? null : <span style={{ opacity: 0.5, fontSize: '0.85rem' }}>None</span>;
                                 

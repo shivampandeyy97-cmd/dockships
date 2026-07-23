@@ -114,12 +114,12 @@ export async function initializeSchema(): Promise<void> {
     // We check if the table has the old columns first. If it does, we drop and rebuild it.
     let rebuildLeads = false;
     try {
-      const row = await getRow<any>('SELECT similarweb_visits FROM dockships_leads LIMIT 1');
-      if (row !== undefined) {
+      const columns = await allRows<{ name: string }>("PRAGMA table_info(dockships_leads);");
+      if (columns.some(col => col.name === 'similarweb_visits')) {
         rebuildLeads = true;
       }
     } catch (e) {
-      // Table doesn't exist, or doesn't have similarweb_visits, which is fine
+      // Table doesn't exist, which is fine
     }
 
     if (rebuildLeads) {

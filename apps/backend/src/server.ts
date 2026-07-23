@@ -14,13 +14,26 @@ import { startGmailPollingCron } from './services/gmailPoller';
 
 dotenv.config();
 
+function safeParseArray(val: any): string[] {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string') {
+    try {
+      const parsed = JSON.parse(val);
+      if (Array.isArray(parsed)) return parsed;
+      return val.trim() ? [val.trim()] : [];
+    } catch {
+      return val.trim() ? [val.trim()] : [];
+    }
+  }
+  return [];
+}
+
 function parseLeadRow(lead: any) {
   if (!lead) return lead;
   return {
     ...lead,
-    fetched_emails: typeof lead.fetched_emails === 'string'
-      ? JSON.parse(lead.fetched_emails || '[]')
-      : (lead.fetched_emails || [])
+    fetched_emails: safeParseArray(lead.fetched_emails)
   };
 }
 
@@ -328,10 +341,7 @@ app.get('/api/leads', async (req, res) => {
       ORDER BY l.created_at DESC
     `);
     
-    const parsedLeads = leads.map(lead => ({
-      ...lead,
-      fetched_emails: JSON.parse(lead.fetched_emails || '[]')
-    }));
+    const parsedLeads = leads.map(lead => parseLeadRow(lead));
 
     return res.json(parsedLeads);
   } catch (err: any) {
@@ -805,7 +815,7 @@ app.post('/api/leads/:id/emails', async (req, res) => {
     }
 
     // Append to fetched_emails list if not already there
-    const emailsList: string[] = JSON.parse(lead.fetched_emails || '[]');
+    const emailsList: string[] = safeParseArray(lead.fetched_emails);
     if (emailsList.map(e => e.toLowerCase()).includes(cleanEmail)) {
       return res.status(400).json({ error: 'Email already exists in lead.' });
     }
@@ -839,7 +849,7 @@ app.delete('/api/leads/:id/emails', async (req, res) => {
 
     const cleanEmail = email.trim().toLowerCase();
     let updatedManualEmail = lead.manual_email;
-    let updatedFetchedEmails = JSON.parse(lead.fetched_emails || '[]');
+    let updatedFetchedEmails = safeParseArray(lead.fetched_emails);
 
     if (lead.manual_email?.toLowerCase() === cleanEmail) {
       updatedManualEmail = null;
@@ -974,7 +984,7 @@ app.post('/api/leads/bulk-email', async (req, res) => {
             continue;
           }
 
-          const emailsList = JSON.parse(lead.fetched_emails || '[]');
+          const emailsList = safeParseArray(lead.fetched_emails);
           const recipient = lead.manual_email || (emailsList.length > 0 ? emailsList[0] : null);
 
           if (!recipient) {
