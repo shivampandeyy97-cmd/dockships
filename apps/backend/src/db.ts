@@ -1,6 +1,11 @@
 import sqlite3 from 'sqlite3';
 import { createClient, Client } from '@libsql/client';
 import path from 'path';
+import dotenv from 'dotenv';
+
+// Load env vars FIRST — db.ts reads process.env at module load time,
+// before dotenv.config() in server.ts has a chance to run.
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const tursoUrl = process.env.TURSO_DATABASE_URL;
 const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;

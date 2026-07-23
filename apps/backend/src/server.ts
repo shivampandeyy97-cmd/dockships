@@ -12,7 +12,7 @@ import { sendSlackMessage, sendSlackAlert, getSlackSettings, initSlackClient, ha
 import { dockshipsAgent } from './services/agent';
 import { startGmailPollingCron } from './services/gmailPoller';
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 function safeParseArray(val: any): string[] {
   if (!val) return [];
