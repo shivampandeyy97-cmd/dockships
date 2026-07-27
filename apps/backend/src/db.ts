@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 
 // Load env vars FIRST — db.ts reads process.env at module load time,
 // before dotenv.config() in server.ts has a chance to run.
+// In production (Render/Docker), .env won't exist but process.env is already populated.
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const tursoUrl = process.env.TURSO_DATABASE_URL;
@@ -15,11 +16,18 @@ let db: sqlite3.Database | null = null;
 let libsqlClient: Client | null = null;
 
 if (isTurso) {
-  console.log(`Connecting to Turso Cloud SQLite database at: ${tursoUrl}`);
+  if (!tursoAuthToken) {
+    console.error('⚠️  TURSO_AUTH_TOKEN is not set — Turso connections will fail!');
+  }
+  console.log(`🔌 Connecting to Turso Cloud SQLite: ${tursoUrl}`);
   libsqlClient = createClient({
     url: tursoUrl,
     authToken: tursoAuthToken,
   });
+  // Verify connection immediately at startup
+  libsqlClient.execute("SELECT 1")
+    .then(() => console.log('✅ Turso connection verified successfully.'))
+    .catch((err: Error) => console.error('❌ Turso connection FAILED at startup:', err.message));
 } else {
   const dbPath = process.env.DATABASE_PATH || path.resolve(__dirname, '../dockships.db');
   console.log(`Connecting to local SQLite database at: ${dbPath}`);
