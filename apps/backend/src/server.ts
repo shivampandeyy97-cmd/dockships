@@ -1823,6 +1823,95 @@ app.get('/api/mailmerge/campaigns/:id', async (req, res) => {
   }
 });
 
+async function processMmCampaign(id: string, userId: string, backendUrl: string) {
+  try {
+    const campaign = await getRow<any>('SELECT * FROM dockships_mm_campaigns WHERE id = ?', [id]);
+    if (!campaign) return;
+    const delayMs = campaign.send_delay_ms || 500;
+    const disableTracking = !!campaign.disable_tracking;
+
+    while (activeMmJobs[id] && !activeMmJobs[id].cancel) {
+      const pending = await allRows<any>(
+        "SELECT * FROM dockships_mm_recipients WHERE campaign_id = ? AND status = 'pending' LIMIT 20",
+        [id]
+      );
+      if (!pending || pending.length === 0) break;
+
+      for (const recipient of pending) {
+        if (!activeMmJobs[id] || activeMmJobs[id].cancel) break;
+
+        let vars: Record<string, string> = {};
+        try { vars = JSON.parse(recipient.variables || '{}'); } catch (_) {}
+        vars['email'] = recipient.email;
+
+        const resolvedSubject = applyVariables(campaign.subject, vars);
+        let resolvedBody = applyVariables(campaign.body, vars);
+
+        const logId = crypto.randomUUID();
+        if (!disableTracking) {
+          resolvedBody = resolvedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
+            if (url.startsWith('http')) {
+              return `href="${backendUrl}/api/mailmerge/click/${recipient.id}?url=${encodeURIComponent(url)}"`;
+            }
+            return match;
+          });
+          resolvedBody += `<img src="${backendUrl}/api/mailmerge/track/${recipient.id}" width="1" height="1" style="display:none;" alt="" />`;
+        }
+
+        try {
+          const mailResult = await sendOutreachEmail(
+            { to: recipient.email, subject: resolvedSubject, body: resolvedBody },
+            userId
+          );
+
+          if (mailResult.success) {
+            const sentAt = new Date().toISOString();
+            await runQuery(
+              `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status, sent_at)
+               VALUES (?, NULL, ?, ?, ?, 'sent', ?)`,
+              [logId, recipient.email, resolvedSubject, resolvedBody, sentAt]
+            );
+            await runQuery(
+              `UPDATE dockships_mm_recipients SET status = 'sent', email_log_id = ?, sent_at = ? WHERE id = ?`,
+              [logId, sentAt, recipient.id]
+            );
+            await runQuery(
+              `UPDATE dockships_mm_campaigns SET sent = sent + 1, updated_at = datetime('now') WHERE id = ?`,
+              [id]
+            );
+          } else {
+            await runQuery(
+              `UPDATE dockships_mm_recipients SET status = 'failed', error = ? WHERE id = ?`,
+              [mailResult.error || 'Send failed', recipient.id]
+            );
+          }
+        } catch (sendErr: any) {
+          await runQuery(
+            `UPDATE dockships_mm_recipients SET status = 'failed', error = ? WHERE id = ?`,
+            [sendErr.message, recipient.id]
+          );
+        }
+
+        if (delayMs > 0) {
+          await new Promise(r => setTimeout(r, delayMs));
+        }
+      }
+    }
+
+    const job = activeMmJobs[id];
+    const newStatus = (job && job.cancel) ? 'paused' : 'completed';
+    await runQuery(
+      `UPDATE dockships_mm_campaigns SET status = ?, updated_at = datetime('now') WHERE id = ?`,
+      [newStatus, id]
+    );
+  } catch (fatalErr: any) {
+    console.error('[Mail Merge Send] Fatal error:', fatalErr.message);
+    await runQuery("UPDATE dockships_mm_campaigns SET status = 'paused', updated_at = datetime('now') WHERE id = ?", [id]);
+  } finally {
+    delete activeMmJobs[id];
+  }
+}
+
 // POST — send/resume a campaign
 app.post('/api/mailmerge/campaigns/:id/send', async (req, res) => {
   const { id } = req.params;
@@ -1832,102 +1921,17 @@ app.post('/api/mailmerge/campaigns/:id/send', async (req, res) => {
   try {
     const campaign = await getRow<any>('SELECT * FROM dockships_mm_campaigns WHERE id = ?', [id]);
     if (!campaign) return res.status(404).json({ error: 'Campaign not found.' });
-    if (campaign.status === 'sending') return res.status(409).json({ error: 'Campaign is already sending.' });
 
     // Mark as sending
     await runQuery("UPDATE dockships_mm_campaigns SET status = 'sending', updated_at = datetime('now') WHERE id = ?", [id]);
-
     activeMmJobs[id] = { cancel: false };
     const backendUrl = req.protocol + '://' + req.get('host');
-    const delayMs = campaign.send_delay_ms || 500;
-    const disableTracking = !!campaign.disable_tracking;
 
-    (async () => {
-      try {
-        while (!activeMmJobs[id]?.cancel) {
-          const pending = await allRows<any>(
-            "SELECT * FROM dockships_mm_recipients WHERE campaign_id = ? AND (status = 'pending' OR status = 'PENDING') LIMIT 20",
-            [id]
-          );
-          if (!pending || pending.length === 0) break;
-
-          for (const recipient of pending) {
-            if (activeMmJobs[id]?.cancel) break;
-
-            let vars: Record<string, string> = {};
-            try { vars = JSON.parse(recipient.variables || '{}'); } catch (_) {}
-            vars['email'] = recipient.email;
-
-            const resolvedSubject = applyVariables(campaign.subject, vars);
-            let resolvedBody = applyVariables(campaign.body, vars);
-
-            const logId = crypto.randomUUID();
-            if (!disableTracking) {
-              resolvedBody = resolvedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
-                if (url.startsWith('http')) {
-                  return `href="${backendUrl}/api/mailmerge/click/${recipient.id}?url=${encodeURIComponent(url)}"`;
-                }
-                return match;
-              });
-              resolvedBody += `<img src="${backendUrl}/api/mailmerge/track/${recipient.id}" width="1" height="1" style="display:none;" alt="" />`;
-            }
-
-            try {
-              const mailResult = await sendOutreachEmail(
-                { to: recipient.email, subject: resolvedSubject, body: resolvedBody },
-                userId
-              );
-
-              if (mailResult.success) {
-                const sentAt = new Date().toISOString();
-                // Log to dockships_emails for unified tracking
-                await runQuery(
-                  `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status, sent_at)
-                   VALUES (?, NULL, ?, ?, ?, 'sent', ?)`,
-                  [logId, recipient.email, resolvedSubject, resolvedBody, sentAt]
-                );
-                await runQuery(
-                  `UPDATE dockships_mm_recipients SET status = 'sent', email_log_id = ?, sent_at = ? WHERE id = ?`,
-                  [logId, sentAt, recipient.id]
-                );
-                await runQuery(
-                  `UPDATE dockships_mm_campaigns SET sent = sent + 1, updated_at = datetime('now') WHERE id = ?`,
-                  [id]
-                );
-              } else {
-                await runQuery(
-                  `UPDATE dockships_mm_recipients SET status = 'failed', error = ? WHERE id = ?`,
-                  [mailResult.error || 'Send failed', recipient.id]
-                );
-              }
-            } catch (sendErr: any) {
-              await runQuery(
-                `UPDATE dockships_mm_recipients SET status = 'failed', error = ? WHERE id = ?`,
-                [sendErr.message, recipient.id]
-              );
-            }
-
-            await new Promise(r => setTimeout(r, delayMs));
-          }
-        }
-
-        const job = activeMmJobs[id];
-        const newStatus = job?.cancel ? 'paused' : 'completed';
-        await runQuery(
-          `UPDATE dockships_mm_campaigns SET status = ?, updated_at = datetime('now') WHERE id = ?`,
-          [newStatus, id]
-        );
-      } catch (fatalErr: any) {
-        console.error('[Mail Merge Send] Fatal error:', fatalErr.message);
-        await runQuery("UPDATE dockships_mm_campaigns SET status = 'paused', updated_at = datetime('now') WHERE id = ?", [id]);
-      } finally {
-        delete activeMmJobs[id];
-      }
-    });
+    processMmCampaign(id, userId, backendUrl).catch(err => console.error('[MM Process Error]:', err));
 
     return res.json({ success: true, message: 'Campaign send started.' });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to start send.' });
+    return res.status(500).json({ error: err.message || 'Failed to start campaign.' });
   }
 });
 
