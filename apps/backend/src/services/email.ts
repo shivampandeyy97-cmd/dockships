@@ -142,41 +142,59 @@ export async function sendOutreachEmail(
       };
     }
 
-    // Case 3: Fallback to environment variables or default SMTP configuration (Resend)
+    // Case 3: Default Resend HTTPS REST API transport (fastest & most reliable)
     const DEFAULT_RESEND_KEY = ['re', 'gZt3gTNx', 'PZeTbRM5b27zjTaYhNVDUpeD'].join('_');
-    const envHost = process.env.SMTP_HOST || 'smtp.resend.com';
-    const envPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
-    const envUser = process.env.SMTP_USER || 'resend';
-    const envPass = process.env.SMTP_PASS || DEFAULT_RESEND_KEY;
-    const envFrom = process.env.SMTP_FROM || 'Dockships <contact@rollinhead.com>';
+    const resendApiKey = process.env.RESEND_API_KEY || process.env.SMTP_PASS || DEFAULT_RESEND_KEY;
+    const fromEmail = process.env.SMTP_FROM || 'Dockships <contact@rollinhead.com>';
 
-    if (envHost && envUser && envPass) {
-      console.log(`Using environment/default SMTP configuration: ${envHost}:${envPort}`);
-      const transporter = nodemailer.createTransport({
-        host: envHost,
-        port: envPort,
-        secure: envPort === 465,
-        auth: {
-          user: envUser,
-          pass: envPass
+    if (resendApiKey) {
+      console.log(`Using Resend HTTPS API transport: ${fromEmail}`);
+      try {
+        const resendRes = await axios.post(
+          'https://api.resend.com/emails',
+          {
+            from: fromEmail,
+            to: [options.to],
+            subject: options.subject,
+            html: options.body,
+            text: options.body.replace(/<[^>]*>/g, '')
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${resendApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000
+          }
+        );
+
+        console.log('Resend HTTPS API sent successfully:', resendRes.data);
+        return {
+          success: true,
+          messageId: resendRes.data?.id || 'resend-api-success'
+        };
+      } catch (apiErr: any) {
+        const apiErrMsg = apiErr.response?.data?.message || apiErr.message;
+        console.error('Resend API error:', apiErrMsg);
+        // If custom SMTP host is set, try standard SMTP as secondary fallback
+        if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+          const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST,
+            port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587,
+            secure: process.env.SMTP_PORT === '465',
+            auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+          });
+          const info = await transporter.sendMail({
+            from: fromEmail,
+            to: options.to,
+            subject: options.subject,
+            text: options.body.replace(/<[^>]*>/g, ''),
+            html: options.body
+          });
+          return { success: true, messageId: info.messageId || 'smtp-id-success' };
         }
-      });
-
-      const mailOptions = {
-        from: envFrom,
-        to: options.to,
-        subject: options.subject,
-        text: options.body.replace(/<[^>]*>/g, ''),
-        html: options.body
-      };
-
-      const info = await transporter.sendMail(mailOptions);
-      console.log('Environment SMTP sent successfully:', info.messageId || info);
-
-      return {
-        success: true,
-        messageId: info.messageId || 'env-id-success'
-      };
+        return { success: false, error: apiErrMsg || 'Failed to dispatch email via Resend API.' };
+      }
     }
 
     // Case 4: No valid transport configured
