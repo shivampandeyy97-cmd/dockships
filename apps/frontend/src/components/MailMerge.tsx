@@ -242,7 +242,7 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
     return { subject: resolvedSubject, body: resolvedBody, email: c.email };
   };
 
-  const handleCreateCampaign = async () => {
+  const handleCreateCampaign = async (autoSend: boolean = false) => {
     if (!campaignName || !subject || !body || contacts.length === 0) {
       setCreateError('Please fill in all fields and add at least one contact.');
       return;
@@ -264,6 +264,10 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
       // Auto-expand the new campaign
       setExpandedCampaign(data.id);
       fetchCampaignDetails(data.id);
+
+      if (autoSend && data.id) {
+        handleSendCampaign(data.id);
+      }
     } catch (err: any) {
       setCreateError(err.message || 'Failed to create campaign.');
     } finally {
@@ -854,21 +858,29 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
               ))}
 
               <div style={{ marginTop: '1.5rem', padding: '0.85rem', background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: '8px', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                ℹ️ The campaign will be saved as a <strong>draft</strong>. You can launch it immediately from the Campaigns list or later.
+                ℹ️ Emails will be delivered from <strong style={{ color: 'var(--text-bright)' }}>contact@rollinhead.com</strong>. Click <strong>Launch & Send Now</strong> to start delivery immediately, or <strong>Save as Draft</strong> to send later.
               </div>
 
-              <div style={{ display: 'flex', gap: '1rem', marginTop: '1.75rem', justifyContent: 'flex-end' }}>
+              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.75rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
                 <button type="button" className="btn btn-secondary" onClick={() => setStep(2)}>
                   ← Back
                 </button>
                 <button
                   type="button"
+                  className="btn btn-secondary"
+                  onClick={() => handleCreateCampaign(false)}
+                  disabled={creating || !campaignName || !subject || !body || contacts.length === 0}
+                >
+                  💾 Save as Draft
+                </button>
+                <button
+                  type="button"
                   className="btn btn-primary"
-                  onClick={handleCreateCampaign}
+                  onClick={() => handleCreateCampaign(true)}
                   disabled={creating || !campaignName || !subject || !body || contacts.length === 0}
                   style={{ minWidth: '160px' }}
                 >
-                  {creating ? 'Creating…' : '💾 Save Campaign'}
+                  {creating ? 'Creating…' : '🚀 Launch & Send Now'}
                 </button>
               </div>
             </div>
