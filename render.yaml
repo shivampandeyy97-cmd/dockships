@@ -11,6 +11,15 @@ services:
         value: production
       - key: PORT
         value: "4001"
+      - key: SMTP_HOST
+        value: smtp.resend.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        value: resend
+      - key: SMTP_FROM
+        value: Dockships <contact@rollinhead.com>
       # TURSO_DATABASE_URL is intentionally NOT set here — this forces
       # the app to use local SQLite (isTurso = false).
+
       # If you want to use Turso, add TURSO_DATABASE_URL and TURSO_AUTH_TOKEN here.

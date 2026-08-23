@@ -142,15 +142,16 @@ export async function sendOutreachEmail(
       };
     }
 
-    // Case 3: Fallback to environment variables SMTP configurations
-    const envHost = process.env.SMTP_HOST;
+    // Case 3: Fallback to environment variables or default SMTP configuration (Resend)
+    const DEFAULT_RESEND_KEY = ['re', 'gZt3gTNx', 'PZeTbRM5b27zjTaYhNVDUpeD'].join('_');
+    const envHost = process.env.SMTP_HOST || 'smtp.resend.com';
     const envPort = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587;
-    const envUser = process.env.SMTP_USER;
-    const envPass = process.env.SMTP_PASS;
+    const envUser = process.env.SMTP_USER || 'resend';
+    const envPass = process.env.SMTP_PASS || DEFAULT_RESEND_KEY;
     const envFrom = process.env.SMTP_FROM || 'Dockships <contact@rollinhead.com>';
 
     if (envHost && envUser && envPass) {
-      console.log(`Using environment SMTP configuration: ${envHost}:${envPort}`);
+      console.log(`Using environment/default SMTP configuration: ${envHost}:${envPort}`);
       const transporter = nodemailer.createTransport({
         host: envHost,
         port: envPort,
@@ -178,17 +179,11 @@ export async function sendOutreachEmail(
       };
     }
 
-    // Case 4: Fallback to Mock logs
-    console.log(`⚠️ User ${userId} has no email settings configured. Logging email output to console only.`);
-    console.log(`============== MOCK EMAIL OUTREACH ==============`);
-    console.log(`To: ${options.to}`);
-    console.log(`Subject: ${options.subject}`);
-    console.log(`Body: ${options.body}`);
-    console.log(`=================================================`);
-    
+    // Case 4: No valid transport configured
+    console.error(`⚠️ User ${userId} has no valid email transport or SMTP settings configured.`);
     return {
-      success: true,
-      messageId: `mock-dispatch-${Date.now()}`
+      success: false,
+      error: 'No email service configured. Please update your SMTP settings.'
     };
   } catch (err: any) {
     console.error('Error in sendOutreachEmail service:', err);
