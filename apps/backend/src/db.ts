@@ -2,6 +2,7 @@ import sqlite3 from 'sqlite3';
 import { createClient, Client } from '@libsql/client';
 import { Pool } from 'pg';
 import path from 'path';
+import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -532,7 +533,17 @@ async function seedDefaultData() {
       `);
       console.log('Default draft template seeded.');
     }
+    const checkUsers = await getRow<{ count: number }>('SELECT count(*) as count FROM dockships_users');
+    if (!checkUsers || checkUsers.count === 0) {
+      const defaultId = crypto.randomUUID();
+      const defaultHash = await bcrypt.hash('password123', 10);
+      await runQuery(
+        'INSERT INTO dockships_users (id, email, password) VALUES (?, ?, ?)',
+        [defaultId, 'admin@dockships.com', defaultHash]
+      );
+      console.log('Default admin user seeded (admin@dockships.com).');
+    }
   } catch (draftsErr) {
-    console.error('Error seeding draft templates:', draftsErr);
+    console.error('Error seeding default data:', draftsErr);
   }
 }
