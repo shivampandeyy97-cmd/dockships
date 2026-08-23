@@ -100,6 +100,32 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+async function parseJsonResponse(res: Response): Promise<any> {
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || `Server error (${res.status})`);
+    }
+    return data;
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    if (res.status === 502) {
+      throw new Error('Server is restarting or deploying (502 Bad Gateway). Please try again in a few seconds.');
+    }
+    if (res.status === 413) {
+      throw new Error('Payload too large (413). Please reduce the number of contacts.');
+    }
+    throw new Error(`Server error (${res.status}): ${res.statusText || 'Unexpected non-JSON response'}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
   const [view, setView] = useState<'campaigns' | 'create'>('campaigns');
   const [campaigns, setCampaigns] = useState<MmCampaign[]>([]);
@@ -130,7 +156,7 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
     setLoadingCampaigns(true);
     try {
       const res = await fetch(`${API_URL}/api/mailmerge/campaigns?userId=${userId}`);
-      if (res.ok) setCampaigns(await res.json());
+      if (res.ok) setCampaigns(await parseJsonResponse(res));
     } catch (e) { console.error(e); }
     finally { setLoadingCampaigns(false); }
   };
@@ -139,7 +165,7 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
     setLoadingDetails(true);
     try {
       const res = await fetch(`${API_URL}/api/mailmerge/campaigns/${id}`);
-      if (res.ok) setCampaignDetails(await res.json());
+      if (res.ok) setCampaignDetails(await parseJsonResponse(res));
     } catch (e) { console.error(e); }
     finally { setLoadingDetails(false); }
   };
@@ -155,7 +181,7 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
         try {
           const res = await fetch(`${API_URL}/api/mailmerge/campaigns/${activeCampaign.id}/status`);
           if (res.ok) {
-            const data = await res.json();
+            const data = await parseJsonResponse(res);
             setCampaigns(prev => prev.map(c => c.id === activeCampaign.id
               ? { ...c, ...data, status: data.status }
               : c
@@ -229,8 +255,7 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, name: campaignName, subject, body, contacts, sendDelayMs: sendDelay, disableTracking })
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await parseJsonResponse(res);
       // Reset form
       setCampaignName(''); setSubject(''); setBody(''); setContacts([]); setCsvHeaders([]);
       setSelectedDraftId(''); setStep(1);
@@ -254,8 +279,7 @@ export const MailMerge: React.FC<MailMergeProps> = ({ userId, drafts }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId })
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      await parseJsonResponse(res);
       await fetchCampaigns();
     } catch (err: any) {
       alert(err.message || 'Failed to start campaign.');
