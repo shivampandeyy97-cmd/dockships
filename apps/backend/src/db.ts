@@ -10,7 +10,8 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const tursoUrl = process.env.TURSO_DATABASE_URL;
 const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;
-const isTurso = !!tursoUrl;
+// Only use Turso if URL is explicitly provided and non-empty
+const isTurso = !!(tursoUrl && tursoUrl.trim().length > 0);
 
 let db: sqlite3.Database | null = null;
 let libsqlClient: Client | null = null;
@@ -21,7 +22,7 @@ if (isTurso) {
   }
   console.log(`🔌 Connecting to Turso Cloud SQLite: ${tursoUrl}`);
   libsqlClient = createClient({
-    url: tursoUrl,
+    url: tursoUrl!,
     authToken: tursoAuthToken,
   });
   // Verify connection immediately at startup
@@ -29,13 +30,15 @@ if (isTurso) {
     .then(() => console.log('✅ Turso connection verified successfully.'))
     .catch((err: Error) => console.error('❌ Turso connection FAILED at startup:', err.message));
 } else {
+  // Use local SQLite — DATABASE_PATH points to the Render persistent disk (/data/dockships.db)
+  // or falls back to local file in dev
   const dbPath = process.env.DATABASE_PATH || path.resolve(__dirname, '../dockships.db');
-  console.log(`Connecting to local SQLite database at: ${dbPath}`);
+  console.log(`📁 Using local SQLite database at: ${dbPath}`);
   db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
       console.error('Error opening SQLite database:', err);
     } else {
-      console.log('Successfully connected to SQLite database.');
+      console.log('✅ Successfully connected to local SQLite database.');
     }
   });
 }

@@ -20,6 +20,10 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NODE_ENV=production
 
+# Create persistent data directory for SQLite (Render mounts disk here)
+RUN mkdir -p /data && chmod 777 /data
+ENV DATABASE_PATH=/data/dockships.db
+
 # Install pnpm globally
 RUN npm install -g pnpm@11.4.0
 

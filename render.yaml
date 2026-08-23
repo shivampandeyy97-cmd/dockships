@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: dockships
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    disk:
+      name: dockships-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /data/dockships.db
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4001"
