@@ -971,7 +971,7 @@ app.post('/api/leads/bulk-email', async (req, res) => {
     const backendUrl = req.protocol + '://' + req.get('host');
 
     // Start background processing
-    setImmediate(async () => {
+    (async () => {
       for (const leadId of leadIds) {
         try {
           const job = bulkEmailJobs[jobId];
@@ -1842,14 +1842,14 @@ app.post('/api/mailmerge/campaigns/:id/send', async (req, res) => {
     const delayMs = campaign.send_delay_ms || 500;
     const disableTracking = !!campaign.disable_tracking;
 
-    setImmediate(async () => {
+    (async () => {
       try {
         while (!activeMmJobs[id]?.cancel) {
           const pending = await allRows<any>(
-            "SELECT * FROM dockships_mm_recipients WHERE campaign_id = ? AND status = 'pending' LIMIT 20",
+            "SELECT * FROM dockships_mm_recipients WHERE campaign_id = ? AND (status = 'pending' OR status = 'PENDING') LIMIT 20",
             [id]
           );
-          if (pending.length === 0) break;
+          if (!pending || pending.length === 0) break;
 
           for (const recipient of pending) {
             if (activeMmJobs[id]?.cancel) break;
