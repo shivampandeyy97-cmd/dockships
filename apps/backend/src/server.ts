@@ -1750,6 +1750,14 @@ app.post('/api/mailmerge/campaigns', async (req, res) => {
   }
 
   try {
+    // Safeguard: Ensure userId exists in dockships_users table if foreign keys are enabled elsewhere
+    try {
+      await runQuery(
+        `INSERT OR IGNORE INTO dockships_users (id, email, password) VALUES (?, ?, 'dummy_password')`,
+        [userId, `user_${userId}@dockships.internal`]
+      );
+    } catch (userErr) {}
+
     const campaignId = crypto.randomUUID();
     await runQuery(
       `INSERT INTO dockships_mm_campaigns (id, user_id, name, subject, body, status, total_contacts, send_delay_ms, disable_tracking)

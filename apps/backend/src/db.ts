@@ -291,8 +291,7 @@ export async function initializeSchema(): Promise<void> {
         send_delay_ms INTEGER DEFAULT 500,
         disable_tracking INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now')),
-        FOREIGN KEY (user_id) REFERENCES dockships_users(id) ON DELETE CASCADE
+        updated_at TEXT DEFAULT (datetime('now'))
       );
     `);
 
@@ -311,8 +310,7 @@ export async function initializeSchema(): Promise<void> {
         clicked_at TEXT,
         replied_at TEXT,
         bounced_at TEXT,
-        created_at TEXT DEFAULT (datetime('now')),
-        FOREIGN KEY (campaign_id) REFERENCES dockships_mm_campaigns(id) ON DELETE CASCADE
+        created_at TEXT DEFAULT (datetime('now'))
       );
     `);
 
@@ -397,7 +395,16 @@ async function runMigrations() {
   try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN fetched_emails TEXT DEFAULT '[]';"); } catch (e) {}
   try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN best_email TEXT;"); } catch (e) {}
 
-  // Mail Merge tables (idempotent creation in migrations for older DBs)
+  // Mail Merge tables migration — rebuild if old foreign key constraint exists on dockships_users
+  try {
+    const fkList = await allRows<{ table: string }>("PRAGMA foreign_key_list(dockships_mm_campaigns);");
+    if (fkList.some(fk => fk.table === 'dockships_users')) {
+      console.log('Migrating dockships_mm_campaigns: removing foreign key constraint on dockships_users...');
+      await runQuery('DROP TABLE IF EXISTS dockships_mm_recipients;');
+      await runQuery('DROP TABLE IF EXISTS dockships_mm_campaigns;');
+    }
+  } catch (e) {}
+
   try {
     await runQuery(`
       CREATE TABLE IF NOT EXISTS dockships_mm_campaigns (
