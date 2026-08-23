@@ -1734,7 +1734,329 @@ app.get('/api/sellers/companies', async (req, res) => {
   }
 });
 
+// ===== MAIL MERGE ENDPOINTS =====
+
+const activeMmJobs: Record<string, { cancel: boolean }> = {};
+
+function applyVariables(template: string, variables: Record<string, string>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (_, key) => variables[key] ?? `{{${key}}}`);
+}
+
+// POST — create new mail merge campaign (contacts uploaded here)
+app.post('/api/mailmerge/campaigns', async (req, res) => {
+  const { userId, name, subject, body, contacts, sendDelayMs, disableTracking } = req.body;
+  if (!userId || !name || !subject || !body || !contacts || !Array.isArray(contacts) || contacts.length === 0) {
+    return res.status(400).json({ error: 'userId, name, subject, body, and contacts[] are required.' });
+  }
+
+  try {
+    const campaignId = crypto.randomUUID();
+    await runQuery(
+      `INSERT INTO dockships_mm_campaigns (id, user_id, name, subject, body, status, total_contacts, send_delay_ms, disable_tracking)
+       VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?)`,
+      [campaignId, userId, name.trim(), subject.trim(), body.trim(), contacts.length, sendDelayMs || 500, disableTracking ? 1 : 0]
+    );
+
+    // Insert recipients
+    const chunkSize = 100;
+    for (let i = 0; i < contacts.length; i += chunkSize) {
+      const chunk = contacts.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '(?, ?, ?, ?)').join(', ');
+      const params: any[] = [];
+      chunk.forEach((c: any) => {
+        const email = (c.email || '').trim().toLowerCase();
+        // Build variables map from all keys except 'email'
+        const vars: Record<string, string> = {};
+        Object.keys(c).forEach(k => { if (k !== 'email') vars[k] = String(c[k] || ''); });
+        params.push(crypto.randomUUID(), campaignId, email, JSON.stringify(vars));
+      });
+      await runQuery(
+        `INSERT INTO dockships_mm_recipients (id, campaign_id, email, variables) VALUES ${placeholders}`,
+        params
+      );
+    }
+
+    const campaign = await getRow('SELECT * FROM dockships_mm_campaigns WHERE id = ?', [campaignId]);
+    return res.status(201).json(campaign);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to create campaign.' });
+  }
+});
+
+// GET — list all campaigns for a user
+app.get('/api/mailmerge/campaigns', async (req, res) => {
+  const { userId } = req.query;
+  if (!userId) return res.status(400).json({ error: 'userId query parameter is required.' });
+  try {
+    const campaigns = await allRows(
+      'SELECT * FROM dockships_mm_campaigns WHERE user_id = ? ORDER BY created_at DESC',
+      [String(userId)]
+    );
+    return res.json(campaigns);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to list campaigns.' });
+  }
+});
+
+// GET — get single campaign with recipients
+app.get('/api/mailmerge/campaigns/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const campaign = await getRow('SELECT * FROM dockships_mm_campaigns WHERE id = ?', [id]);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found.' });
+    const recipients = await allRows(
+      'SELECT * FROM dockships_mm_recipients WHERE campaign_id = ? ORDER BY created_at ASC',
+      [id]
+    );
+    return res.json({ campaign, recipients });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to get campaign.' });
+  }
+});
+
+// POST — send/resume a campaign
+app.post('/api/mailmerge/campaigns/:id/send', async (req, res) => {
+  const { id } = req.params;
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId is required.' });
+
+  try {
+    const campaign = await getRow<any>('SELECT * FROM dockships_mm_campaigns WHERE id = ?', [id]);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found.' });
+    if (campaign.status === 'sending') return res.status(409).json({ error: 'Campaign is already sending.' });
+
+    // Mark as sending
+    await runQuery("UPDATE dockships_mm_campaigns SET status = 'sending', updated_at = datetime('now') WHERE id = ?", [id]);
+
+    activeMmJobs[id] = { cancel: false };
+    const backendUrl = req.protocol + '://' + req.get('host');
+    const delayMs = campaign.send_delay_ms || 500;
+    const disableTracking = !!campaign.disable_tracking;
+
+    setImmediate(async () => {
+      try {
+        while (!activeMmJobs[id]?.cancel) {
+          const pending = await allRows<any>(
+            "SELECT * FROM dockships_mm_recipients WHERE campaign_id = ? AND status = 'pending' LIMIT 20",
+            [id]
+          );
+          if (pending.length === 0) break;
+
+          for (const recipient of pending) {
+            if (activeMmJobs[id]?.cancel) break;
+
+            let vars: Record<string, string> = {};
+            try { vars = JSON.parse(recipient.variables || '{}'); } catch (_) {}
+            vars['email'] = recipient.email;
+
+            const resolvedSubject = applyVariables(campaign.subject, vars);
+            let resolvedBody = applyVariables(campaign.body, vars);
+
+            const logId = crypto.randomUUID();
+            if (!disableTracking) {
+              resolvedBody = resolvedBody.replace(/href="([^"]+)"/g, (match: string, url: string) => {
+                if (url.startsWith('http')) {
+                  return `href="${backendUrl}/api/mailmerge/click/${recipient.id}?url=${encodeURIComponent(url)}"`;
+                }
+                return match;
+              });
+              resolvedBody += `<img src="${backendUrl}/api/mailmerge/track/${recipient.id}" width="1" height="1" style="display:none;" alt="" />`;
+            }
+
+            try {
+              const mailResult = await sendOutreachEmail(
+                { to: recipient.email, subject: resolvedSubject, body: resolvedBody },
+                userId
+              );
+
+              if (mailResult.success) {
+                const sentAt = new Date().toISOString();
+                // Log to dockships_emails for unified tracking
+                await runQuery(
+                  `INSERT INTO dockships_emails (id, lead_id, recipient_email, subject, body, status, sent_at)
+                   VALUES (?, NULL, ?, ?, ?, 'sent', ?)`,
+                  [logId, recipient.email, resolvedSubject, resolvedBody, sentAt]
+                );
+                await runQuery(
+                  `UPDATE dockships_mm_recipients SET status = 'sent', email_log_id = ?, sent_at = ? WHERE id = ?`,
+                  [logId, sentAt, recipient.id]
+                );
+                await runQuery(
+                  `UPDATE dockships_mm_campaigns SET sent = sent + 1, updated_at = datetime('now') WHERE id = ?`,
+                  [id]
+                );
+              } else {
+                await runQuery(
+                  `UPDATE dockships_mm_recipients SET status = 'failed', error = ? WHERE id = ?`,
+                  [mailResult.error || 'Send failed', recipient.id]
+                );
+              }
+            } catch (sendErr: any) {
+              await runQuery(
+                `UPDATE dockships_mm_recipients SET status = 'failed', error = ? WHERE id = ?`,
+                [sendErr.message, recipient.id]
+              );
+            }
+
+            await new Promise(r => setTimeout(r, delayMs));
+          }
+        }
+
+        const job = activeMmJobs[id];
+        const newStatus = job?.cancel ? 'paused' : 'completed';
+        await runQuery(
+          `UPDATE dockships_mm_campaigns SET status = ?, updated_at = datetime('now') WHERE id = ?`,
+          [newStatus, id]
+        );
+      } catch (fatalErr: any) {
+        console.error('[Mail Merge Send] Fatal error:', fatalErr.message);
+        await runQuery("UPDATE dockships_mm_campaigns SET status = 'paused', updated_at = datetime('now') WHERE id = ?", [id]);
+      } finally {
+        delete activeMmJobs[id];
+      }
+    });
+
+    return res.json({ success: true, message: 'Campaign send started.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to start send.' });
+  }
+});
+
+// POST — pause a sending campaign
+app.post('/api/mailmerge/campaigns/:id/pause', async (req, res) => {
+  const { id } = req.params;
+  if (activeMmJobs[id]) {
+    activeMmJobs[id].cancel = true;
+  }
+  return res.json({ success: true, message: 'Pause requested.' });
+});
+
+// GET — poll campaign send status
+app.get('/api/mailmerge/campaigns/:id/status', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const campaign = await getRow<any>('SELECT * FROM dockships_mm_campaigns WHERE id = ?', [id]);
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found.' });
+
+    // Sync aggregate stats from recipients table
+    const stats = await getRow<any>(
+      `SELECT
+        SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) as sent,
+        SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) as delivered,
+        SUM(CASE WHEN status = 'opened' THEN 1 ELSE 0 END) as opened,
+        SUM(CASE WHEN status = 'clicked' THEN 1 ELSE 0 END) as clicked,
+        SUM(CASE WHEN status = 'replied' THEN 1 ELSE 0 END) as replied,
+        SUM(CASE WHEN status = 'bounced' THEN 1 ELSE 0 END) as bounced,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
+       FROM dockships_mm_recipients WHERE campaign_id = ?`,
+      [id]
+    );
+
+    return res.json({
+      id: campaign.id,
+      status: campaign.status,
+      name: campaign.name,
+      total_contacts: campaign.total_contacts,
+      sent: stats?.sent || 0,
+      delivered: stats?.delivered || 0,
+      opened: stats?.opened || 0,
+      clicked: stats?.clicked || 0,
+      replied: stats?.replied || 0,
+      bounced: stats?.bounced || 0,
+      failed: stats?.failed || 0,
+      isSending: !!activeMmJobs[id]
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to get status.' });
+  }
+});
+
+// DELETE — delete a campaign
+app.delete('/api/mailmerge/campaigns/:id', async (req, res) => {
+  const { id } = req.params;
+  if (activeMmJobs[id]) activeMmJobs[id].cancel = true;
+  try {
+    await runQuery('DELETE FROM dockships_mm_campaigns WHERE id = ?', [id]);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete campaign.' });
+  }
+});
+
+// GET — Mail Merge open tracking pixel
+app.get('/api/mailmerge/track/:recipientId', async (req, res) => {
+  const { recipientId } = req.params;
+  try {
+    const recipient = await getRow<any>(
+      "SELECT id, campaign_id, status FROM dockships_mm_recipients WHERE id = ?",
+      [recipientId]
+    );
+    if (recipient && recipient.status === 'sent') {
+      const openedAt = new Date().toISOString();
+      await runQuery(
+        "UPDATE dockships_mm_recipients SET status = 'opened', opened_at = ? WHERE id = ?",
+        [openedAt, recipientId]
+      );
+      await runQuery(
+        "UPDATE dockships_mm_campaigns SET opened = opened + 1, updated_at = datetime('now') WHERE id = ?",
+        [recipient.campaign_id]
+      );
+      // Also update the linked email log if present
+      if (recipient.email_log_id) {
+        await runQuery(
+          "UPDATE dockships_emails SET status = 'opened', opened_at = ? WHERE id = ? AND status = 'sent'",
+          [openedAt, recipient.email_log_id]
+        );
+      }
+    }
+  } catch (err) { /* silent */ }
+
+  const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+  res.writeHead(200, {
+    'Content-Type': 'image/gif',
+    'Content-Length': gif.length,
+    'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  });
+  return res.end(gif);
+});
+
+// GET — Mail Merge click tracking redirect
+app.get('/api/mailmerge/click/:recipientId', async (req, res) => {
+  const { recipientId } = req.params;
+  const { url } = req.query;
+  if (!url || typeof url !== 'string') return res.status(400).send('Missing url param.');
+  try {
+    const recipient = await getRow<any>(
+      "SELECT id, campaign_id, status FROM dockships_mm_recipients WHERE id = ?",
+      [recipientId]
+    );
+    if (recipient && ['sent', 'opened'].includes(recipient.status)) {
+      const clickedAt = new Date().toISOString();
+      await runQuery(
+        "UPDATE dockships_mm_recipients SET status = 'clicked', clicked_at = ? WHERE id = ?",
+        [clickedAt, recipientId]
+      );
+      await runQuery(
+        "UPDATE dockships_mm_campaigns SET clicked = clicked + 1, updated_at = datetime('now') WHERE id = ?",
+        [recipient.campaign_id]
+      );
+      if (recipient.email_log_id) {
+        await runQuery(
+          "UPDATE dockships_emails SET status = 'clicked', clicked_at = ? WHERE id = ? AND status IN ('sent','opened')",
+          [clickedAt, recipient.email_log_id]
+        );
+      }
+    }
+  } catch (err) { /* silent */ }
+  return res.redirect(url);
+});
+
+// ===== END MAIL MERGE ENDPOINTS =====
+
 // ===== END NEW ENDPOINTS =====
+
 
 // Serve frontend static assets in production
 const frontendBuildPath = path.resolve(__dirname, '../../frontend/dist');

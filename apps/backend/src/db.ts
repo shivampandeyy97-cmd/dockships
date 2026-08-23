@@ -269,6 +269,54 @@ export async function initializeSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_dockships_sellers_company_domain ON dockships_sellers(company_domain);
     `);
 
+    // Mail Merge Campaigns table
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_mm_campaigns (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT DEFAULT 'draft',
+        total_contacts INTEGER DEFAULT 0,
+        sent INTEGER DEFAULT 0,
+        delivered INTEGER DEFAULT 0,
+        opened INTEGER DEFAULT 0,
+        clicked INTEGER DEFAULT 0,
+        replied INTEGER DEFAULT 0,
+        bounced INTEGER DEFAULT 0,
+        send_delay_ms INTEGER DEFAULT 500,
+        disable_tracking INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (user_id) REFERENCES dockships_users(id) ON DELETE CASCADE
+      );
+    `);
+
+    // Mail Merge Recipients table (one row per contact per campaign)
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_mm_recipients (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        variables TEXT DEFAULT '{}',
+        status TEXT DEFAULT 'pending',
+        error TEXT,
+        email_log_id TEXT,
+        sent_at TEXT,
+        opened_at TEXT,
+        clicked_at TEXT,
+        replied_at TEXT,
+        bounced_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (campaign_id) REFERENCES dockships_mm_campaigns(id) ON DELETE CASCADE
+      );
+    `);
+
+    await runQuery(`
+      CREATE INDEX IF NOT EXISTS idx_mm_recipients_campaign_id ON dockships_mm_recipients(campaign_id);
+    `);
+
     await runMigrations();
     await seedDefaultData();
     console.log(`Database tables successfully initialized (${isTurso ? 'Turso' : 'local SQLite'}).`);
@@ -345,6 +393,52 @@ async function runMigrations() {
   try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN ads_detected TEXT DEFAULT 'pending';"); } catch (e) {}
   try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN fetched_emails TEXT DEFAULT '[]';"); } catch (e) {}
   try { await runQuery("ALTER TABLE dockships_sellers ADD COLUMN best_email TEXT;"); } catch (e) {}
+
+  // Mail Merge tables (idempotent creation in migrations for older DBs)
+  try {
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_mm_campaigns (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT DEFAULT 'draft',
+        total_contacts INTEGER DEFAULT 0,
+        sent INTEGER DEFAULT 0,
+        delivered INTEGER DEFAULT 0,
+        opened INTEGER DEFAULT 0,
+        clicked INTEGER DEFAULT 0,
+        replied INTEGER DEFAULT 0,
+        bounced INTEGER DEFAULT 0,
+        send_delay_ms INTEGER DEFAULT 500,
+        disable_tracking INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+  } catch (e) {}
+
+  try {
+    await runQuery(`
+      CREATE TABLE IF NOT EXISTS dockships_mm_recipients (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        variables TEXT DEFAULT '{}',
+        status TEXT DEFAULT 'pending',
+        error TEXT,
+        email_log_id TEXT,
+        sent_at TEXT,
+        opened_at TEXT,
+        clicked_at TEXT,
+        replied_at TEXT,
+        bounced_at TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    await runQuery(`CREATE INDEX IF NOT EXISTS idx_mm_recipients_campaign_id ON dockships_mm_recipients(campaign_id);`);
+  } catch (e) {}
 }
 
 async function seedDefaultData() {

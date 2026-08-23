@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { OutreachComposer } from './OutreachComposer';
+import { MailMerge } from './MailMerge';
 import { API_URL } from '../config';
 
 interface User {
@@ -222,7 +223,7 @@ function safeParseEmails(emailsInput: any): string[] {
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
-  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'templates' | 'agent' | 'sellers'>('leads');
+  const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'templates' | 'agent' | 'sellers' | 'mailmerge'>('leads');
 
   // Sellers states
   const [crawledCompanies, setCrawledCompanies] = useState<string[]>([]);
@@ -646,10 +647,20 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
       });
   };
 
-  // Fetch company lists initially
+  // Fetch company lists initially + auto-select first on load
   useEffect(() => {
     fetchCrawledCompanies();
   }, []);
+
+  // Auto-select first crawled company when list loads and nothing is selected
+  useEffect(() => {
+    if (crawledCompanies.length > 0 && !selectedCompany) {
+      const first = crawledCompanies[0];
+      setSelectedCompany(first);
+      setSellersPage(1);
+      fetchSellers(first, 1, '', 'all', 'all');
+    }
+  }, [crawledCompanies]);
 
   // Poll active crawls for sellers
   useEffect(() => {
@@ -977,6 +988,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
     } else if (activeTab === 'agent') {
       fetchSlackSettings();
       fetchAgentStats();
+    } else if (activeTab === 'sellers') {
+      fetchCrawledCompanies();
     }
 
     return () => {
@@ -1342,6 +1355,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
             style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
           >
             🔍 Sellers.json Crawler
+          </button>
+          <button 
+            className={`btn ${activeTab === 'mailmerge' ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => { setActiveTab('mailmerge'); fetchDrafts(); }}
+            style={{ padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+          >
+            ✉️ Mail Merge
           </button>
         </nav>
 
@@ -2980,6 +3000,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
               <p style={{ marginTop: '0.35rem', fontSize: '0.85rem' }}>Enter a website URL above to fetch sellers, or choose a previously crawled company.</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Mail Merge Tab */}
+      {activeTab === 'mailmerge' && (
+        <div className="animate-fade" style={{ padding: '0 0 2rem' }}>
+          <MailMerge userId={user.id} drafts={drafts} />
         </div>
       )}
 
