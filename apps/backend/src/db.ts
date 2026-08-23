@@ -1,22 +1,34 @@
 import sqlite3 from 'sqlite3';
 import { createClient, Client } from '@libsql/client';
+import { Pool } from 'pg';
 import path from 'path';
 import dotenv from 'dotenv';
 
 // Load env vars FIRST — db.ts reads process.env at module load time,
 // before dotenv.config() in server.ts has a chance to run.
-// In production (Render/Docker), .env won't exist but process.env is already populated.
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+const dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.SUPABASE_DB_URL;
+const isPostgres = !!(dbUrl && (dbUrl.startsWith('postgres://') || dbUrl.startsWith('postgresql://')));
 
 const tursoUrl = process.env.TURSO_DATABASE_URL;
 const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;
-// Only use Turso if URL is explicitly provided and non-empty
-const isTurso = !!(tursoUrl && tursoUrl.trim().length > 0);
+const isTurso = !isPostgres && !!(tursoUrl && tursoUrl.trim().length > 0);
 
 let db: sqlite3.Database | null = null;
 let libsqlClient: Client | null = null;
+let pgPool: Pool | null = null;
 
-if (isTurso) {
+if (isPostgres) {
+  console.log(`🔌 Connecting to PostgreSQL / Supabase Database: ${dbUrl!.split('@')[1] || 'Cloud Postgres'}`);
+  pgPool = new Pool({
+    connectionString: dbUrl,
+    ssl: { rejectUnauthorized: false }
+  });
+  pgPool.query("SELECT 1")
+    .then(() => console.log('✅ PostgreSQL / Supabase connection verified successfully.'))
+    .catch((err: Error) => console.error('❌ PostgreSQL connection FAILED:', err.message));
+} else if (isTurso) {
   if (!tursoAuthToken) {
     console.error('⚠️  TURSO_AUTH_TOKEN is not set — Turso connections will fail!');
   }
@@ -25,13 +37,10 @@ if (isTurso) {
     url: tursoUrl!,
     authToken: tursoAuthToken,
   });
-  // Verify connection immediately at startup
   libsqlClient.execute("SELECT 1")
     .then(() => console.log('✅ Turso connection verified successfully.'))
     .catch((err: Error) => console.error('❌ Turso connection FAILED at startup:', err.message));
 } else {
-  // Use local SQLite — DATABASE_PATH points to the Render persistent disk (/data/dockships.db)
-  // or falls back to local file in dev
   const dbPath = process.env.DATABASE_PATH || path.resolve(__dirname, '../dockships.db');
   console.log(`📁 Using local SQLite database at: ${dbPath}`);
   db = new sqlite3.Database(dbPath, (err) => {
@@ -43,12 +52,32 @@ if (isTurso) {
   });
 }
 
-// Export db for backward compatibility if needed (will be null in Turso mode)
+// Export db for backward compatibility
 export { db };
+
+function formatPgQuery(sql: string): string {
+  let index = 1;
+  let pgSql = sql.replace(/\?/g, () => `$${index++}`);
+  pgSql = pgSql.replace(/datetime\('now'\)/gi, 'CURRENT_TIMESTAMP');
+  return pgSql;
+}
 
 // Helper to run query as a Promise
 export function runQuery(sql: string, params: any[] = []): Promise<{ lastID: number; changes: number }> {
-  if (isTurso && libsqlClient) {
+  if (isPostgres && pgPool) {
+    return (async () => {
+      // Ignore SQLite-specific PRAGMAs in Postgres
+      if (/^PRAGMA /i.test(sql.trim())) {
+        return { lastID: 0, changes: 0 };
+      }
+      const pgSql = formatPgQuery(sql);
+      const res = await pgPool.query(pgSql, params);
+      return {
+        lastID: 0,
+        changes: res.rowCount || 0,
+      };
+    })();
+  } else if (isTurso && libsqlClient) {
     return (async () => {
       const res = await libsqlClient.execute({ sql, args: params });
       return {
@@ -68,7 +97,14 @@ export function runQuery(sql: string, params: any[] = []): Promise<{ lastID: num
 
 // Helper to get single row as a Promise
 export function getRow<T>(sql: string, params: any[] = []): Promise<T | null> {
-  if (isTurso && libsqlClient) {
+  if (isPostgres && pgPool) {
+    return (async () => {
+      if (/^PRAGMA /i.test(sql.trim())) return null;
+      const pgSql = formatPgQuery(sql);
+      const res = await pgPool.query(pgSql, params);
+      return (res.rows[0] as T) || null;
+    })();
+  } else if (isTurso && libsqlClient) {
     return (async () => {
       const res = await libsqlClient.execute({ sql, args: params });
       if (res.rows.length === 0) return null;
@@ -91,7 +127,14 @@ export function getRow<T>(sql: string, params: any[] = []): Promise<T | null> {
 
 // Helper to get all rows as a Promise
 export function allRows<T>(sql: string, params: any[] = []): Promise<T[]> {
-  if (isTurso && libsqlClient) {
+  if (isPostgres && pgPool) {
+    return (async () => {
+      if (/^PRAGMA /i.test(sql.trim())) return [];
+      const pgSql = formatPgQuery(sql);
+      const res = await pgPool.query(pgSql, params);
+      return (res.rows as T[]) || [];
+    })();
+  } else if (isTurso && libsqlClient) {
     return (async () => {
       const res = await libsqlClient.execute({ sql, args: params });
       return res.rows.map((row) => {
