@@ -4,12 +4,10 @@ import { Pool } from 'pg';
 import path from 'path';
 import dotenv from 'dotenv';
 
-// Load env vars FIRST — db.ts reads process.env at module load time,
-// before dotenv.config() in server.ts has a chance to run.
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
-const dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.SUPABASE_DB_URL;
-const isPostgres = !!(dbUrl && (dbUrl.startsWith('postgres://') || dbUrl.startsWith('postgresql://')));
+const rawDbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.SUPABASE_DB_URL;
+const isPostgres = !!(rawDbUrl && (rawDbUrl.startsWith('postgres://') || rawDbUrl.startsWith('postgresql://')));
 
 const tursoUrl = process.env.TURSO_DATABASE_URL;
 const tursoAuthToken = process.env.TURSO_AUTH_TOKEN;
@@ -18,16 +16,42 @@ const isTurso = !isPostgres && !!(tursoUrl && tursoUrl.trim().length > 0);
 let db: sqlite3.Database | null = null;
 let libsqlClient: Client | null = null;
 let pgPool: Pool | null = null;
+let postgresFailed = false;
+
+// Initialize local SQLite DB as fallback instance
+const dbPath = process.env.DATABASE_PATH || path.resolve(__dirname, '../dockships.db');
+db = new sqlite3.Database(dbPath, (err) => {
+  if (err) console.error('Error opening local SQLite database:', err);
+});
 
 if (isPostgres) {
-  console.log(`🔌 Connecting to PostgreSQL / Supabase Database: ${dbUrl!.split('@')[1] || 'Cloud Postgres'}`);
+  let targetUrl = rawDbUrl!.trim();
+  // Auto-rewrite direct Supabase DB URL (db.REF.supabase.co:5432) to IPv4 Pooler URL for Render compatibility
+  if (targetUrl.includes('.supabase.co:5432')) {
+    const match = targetUrl.match(/postgres(?:ql)?:\/\/(?:postgres(?::([^@]+))?|([^:]+):([^@]+))@db\.([a-z0-9]+)\.supabase\.co:5432\/(.*)/i);
+    if (match) {
+      const pass = match[1] || match[3] || '';
+      const ref = match[4];
+      const dbName = match[5] || 'postgres';
+      targetUrl = `postgresql://postgres.${ref}:${pass}@aws-0-ap-southeast-1.pooler.supabase.com:6543/${dbName}`;
+      console.log(`💡 Converted direct Supabase DB URL to IPv4 Pooler URL for Render compatibility.`);
+    }
+  }
+
+  console.log(`🔌 Connecting to PostgreSQL / Supabase Database: ${targetUrl.split('@')[1] || 'Cloud Postgres'}`);
   pgPool = new Pool({
-    connectionString: dbUrl,
-    ssl: { rejectUnauthorized: false }
+    connectionString: targetUrl,
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 10000,
   });
+
   pgPool.query("SELECT 1")
     .then(() => console.log('✅ PostgreSQL / Supabase connection verified successfully.'))
-    .catch((err: Error) => console.error('❌ PostgreSQL connection FAILED:', err.message));
+    .catch((err: Error) => {
+      console.error('⚠️ PostgreSQL connection failed:', err.message);
+      console.log('🔄 Falling back to local SQLite database for maximum reliability.');
+      postgresFailed = true;
+    });
 } else if (isTurso) {
   if (!tursoAuthToken) {
     console.error('⚠️  TURSO_AUTH_TOKEN is not set — Turso connections will fail!');
@@ -41,18 +65,9 @@ if (isPostgres) {
     .then(() => console.log('✅ Turso connection verified successfully.'))
     .catch((err: Error) => console.error('❌ Turso connection FAILED at startup:', err.message));
 } else {
-  const dbPath = process.env.DATABASE_PATH || path.resolve(__dirname, '../dockships.db');
   console.log(`📁 Using local SQLite database at: ${dbPath}`);
-  db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-      console.error('Error opening SQLite database:', err);
-    } else {
-      console.log('✅ Successfully connected to local SQLite database.');
-    }
-  });
 }
 
-// Export db for backward compatibility
 export { db };
 
 function formatPgQuery(sql: string): string {
@@ -62,28 +77,29 @@ function formatPgQuery(sql: string): string {
   return pgSql;
 }
 
-// Helper to run query as a Promise
 export function runQuery(sql: string, params: any[] = []): Promise<{ lastID: number; changes: number }> {
-  if (isPostgres && pgPool) {
+  if (isPostgres && pgPool && !postgresFailed) {
     return (async () => {
-      // Ignore SQLite-specific PRAGMAs in Postgres
       if (/^PRAGMA /i.test(sql.trim())) {
         return { lastID: 0, changes: 0 };
       }
-      const pgSql = formatPgQuery(sql);
-      const res = await pgPool.query(pgSql, params);
-      return {
-        lastID: 0,
-        changes: res.rowCount || 0,
-      };
+      try {
+        const pgSql = formatPgQuery(sql);
+        const res = await pgPool.query(pgSql, params);
+        return { lastID: 0, changes: res.rowCount || 0 };
+      } catch (err: any) {
+        if (['ENETUNREACH', 'ECONNREFUSED', 'ETIMEDOUT', '28P01', '3D000'].includes(err.code) || err.message.includes('ENETUNREACH')) {
+          console.error(`⚠️ PostgreSQL connection error (${err.message}). Switching to local SQLite fallback.`);
+          postgresFailed = true;
+          return runQuery(sql, params);
+        }
+        throw err;
+      }
     })();
   } else if (isTurso && libsqlClient) {
     return (async () => {
       const res = await libsqlClient.execute({ sql, args: params });
-      return {
-        lastID: Number(res.lastInsertRowid ?? 0),
-        changes: res.rowsAffected,
-      };
+      return { lastID: Number(res.lastInsertRowid ?? 0), changes: res.rowsAffected };
     })();
   } else {
     return new Promise((resolve, reject) => {
@@ -95,14 +111,22 @@ export function runQuery(sql: string, params: any[] = []): Promise<{ lastID: num
   }
 }
 
-// Helper to get single row as a Promise
 export function getRow<T>(sql: string, params: any[] = []): Promise<T | null> {
-  if (isPostgres && pgPool) {
+  if (isPostgres && pgPool && !postgresFailed) {
     return (async () => {
       if (/^PRAGMA /i.test(sql.trim())) return null;
-      const pgSql = formatPgQuery(sql);
-      const res = await pgPool.query(pgSql, params);
-      return (res.rows[0] as T) || null;
+      try {
+        const pgSql = formatPgQuery(sql);
+        const res = await pgPool.query(pgSql, params);
+        return (res.rows[0] as T) || null;
+      } catch (err: any) {
+        if (['ENETUNREACH', 'ECONNREFUSED', 'ETIMEDOUT', '28P01', '3D000'].includes(err.code) || err.message.includes('ENETUNREACH')) {
+          console.error(`⚠️ PostgreSQL connection error (${err.message}). Switching to local SQLite fallback.`);
+          postgresFailed = true;
+          return getRow<T>(sql, params);
+        }
+        throw err;
+      }
     })();
   } else if (isTurso && libsqlClient) {
     return (async () => {
@@ -110,9 +134,7 @@ export function getRow<T>(sql: string, params: any[] = []): Promise<T | null> {
       if (res.rows.length === 0) return null;
       const row = res.rows[0];
       const obj: any = {};
-      res.columns.forEach((col, idx) => {
-        obj[col] = row[idx];
-      });
+      res.columns.forEach((col, idx) => { obj[col] = row[idx]; });
       return obj as T;
     })();
   } else {
@@ -125,23 +147,29 @@ export function getRow<T>(sql: string, params: any[] = []): Promise<T | null> {
   }
 }
 
-// Helper to get all rows as a Promise
 export function allRows<T>(sql: string, params: any[] = []): Promise<T[]> {
-  if (isPostgres && pgPool) {
+  if (isPostgres && pgPool && !postgresFailed) {
     return (async () => {
       if (/^PRAGMA /i.test(sql.trim())) return [];
-      const pgSql = formatPgQuery(sql);
-      const res = await pgPool.query(pgSql, params);
-      return (res.rows as T[]) || [];
+      try {
+        const pgSql = formatPgQuery(sql);
+        const res = await pgPool.query(pgSql, params);
+        return (res.rows as T[]) || [];
+      } catch (err: any) {
+        if (['ENETUNREACH', 'ECONNREFUSED', 'ETIMEDOUT', '28P01', '3D000'].includes(err.code) || err.message.includes('ENETUNREACH')) {
+          console.error(`⚠️ PostgreSQL connection error (${err.message}). Switching to local SQLite fallback.`);
+          postgresFailed = true;
+          return allRows<T>(sql, params);
+        }
+        throw err;
+      }
     })();
   } else if (isTurso && libsqlClient) {
     return (async () => {
       const res = await libsqlClient.execute({ sql, args: params });
       return res.rows.map((row) => {
         const obj: any = {};
-        res.columns.forEach((col, idx) => {
-          obj[col] = row[idx];
-        });
+        res.columns.forEach((col, idx) => { obj[col] = row[idx]; });
         return obj;
       }) as T[];
     })();
