@@ -64,11 +64,16 @@ export async function sendOutreachEmail(
       };
     } 
 
-    // Case 2: Fetch user settings from SQLite database
-    const settings = await getRow<SmtpSettings>(
-      'SELECT * FROM dockships_smtp_settings WHERE user_id = ?',
-      [userId]
-    );
+    // Case 2: Fetch user settings from database safely
+    let settings: SmtpSettings | null = null;
+    try {
+      settings = await getRow<SmtpSettings>(
+        'SELECT * FROM dockships_smtp_settings WHERE user_id = ?',
+        [userId]
+      );
+    } catch (dbErr: any) {
+      console.warn('Could not read user SMTP settings, falling back to default Resend API:', dbErr.message);
+    }
 
     // Subcase 2A: Saved Gmail Dispatcher
     if (settings && settings.active_service === 'gmail' && settings.username && settings.password) {

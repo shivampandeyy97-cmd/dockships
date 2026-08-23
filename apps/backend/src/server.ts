@@ -11,8 +11,12 @@ import { sendOutreachEmail } from './services/email';
 import { sendSlackMessage, sendSlackAlert, getSlackSettings, initSlackClient, handleSlackCommand } from './services/slack';
 import { dockshipsAgent } from './services/agent';
 import { startGmailPollingCron } from './services/gmailPoller';
+import { saveSellersSnapshot, restoreSellersSnapshot } from './services/snapshot';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+// Auto-restore sellers snapshot on startup
+restoreSellersSnapshot().catch(err => console.error('Startup snapshot restore error:', err));
 
 function safeParseArray(val: any): string[] {
   if (!val) return [];
@@ -1579,6 +1583,7 @@ app.post('/api/sellers/fetch', async (req, res) => {
     }
 
     crawlSellersBackground(domain);
+    saveSellersSnapshot().catch(err => console.error('Snapshot save error:', err));
 
     return res.json({
       success: true,
@@ -1593,6 +1598,7 @@ app.post('/api/sellers/fetch', async (req, res) => {
 
 // GET sellers for a company with stats, pagination, search, and status filters
 app.get('/api/sellers', async (req, res) => {
+  await restoreSellersSnapshot();
   const { companyDomain, page = '1', limit = '50', search = '', domainStatus = 'all', adsTxtStatus = 'all' } = req.query;
 
   if (!companyDomain) {
@@ -1726,6 +1732,7 @@ app.post('/api/sellers/clear', async (req, res) => {
 // GET all companies that have crawled sellers
 app.get('/api/sellers/companies', async (req, res) => {
   try {
+    await restoreSellersSnapshot();
     const rows = await allRows<{ company_domain: string }>(
       'SELECT DISTINCT company_domain FROM dockships_sellers ORDER BY company_domain ASC'
     );
