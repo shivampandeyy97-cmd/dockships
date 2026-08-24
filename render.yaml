@@ -19,7 +19,10 @@ services:
         value: resend
       - key: SMTP_FROM
         value: Dockships <contact@rollinhead.com>
-      # TURSO_DATABASE_URL is intentionally NOT set here — this forces
-      # the app to use local SQLite (isTurso = false).
+      # ── Supabase (persistent cloud database via HTTPS REST, always works on Render) ──
+      # Get these from: https://supabase.com/dashboard/project/ohsamtseriqghmfyiszi/settings/api
+      - key: SUPABASE_URL
+        value: https://ohsamtseriqghmfyiszi.supabase.co
+      # Set SUPABASE_SERVICE_KEY in Render Dashboard → Environment (DO NOT commit service key)
+      # It's the "service_role" key (NOT the anon key) from Supabase Project Settings > API
 
-      # If you want to use Turso, add TURSO_DATABASE_URL and TURSO_AUTH_TOKEN here.

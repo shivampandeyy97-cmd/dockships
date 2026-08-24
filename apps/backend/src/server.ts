@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import path from 'path';
 import axios from 'axios';
-import { initializeSchema, runQuery, getRow, allRows } from './db';
+import { initializeSchema, runQuery, getRow, allRows, SUPABASE_SCHEMA_SQL } from './db';
 import { crawlWebsite, checkAdsTxt } from './services/crawler';
 import { sendOutreachEmail } from './services/email';
 import { sendSlackMessage, sendSlackAlert, getSlackSettings, initSlackClient, handleSlackCommand } from './services/slack';
@@ -2063,6 +2063,12 @@ app.get('/api/mailmerge/click/:recipientId', async (req, res) => {
 // ===== END NEW ENDPOINTS =====
 
 
+// ─── Supabase Schema Endpoint ───────────────────────────────────────────────
+// Returns the SQL to run in Supabase Dashboard to create all tables.
+app.get('/api/schema', (_req, res) => {
+  res.type('text/plain').send(SUPABASE_SCHEMA_SQL);
+});
+
 // Serve frontend static assets in production
 const frontendBuildPath = path.resolve(__dirname, '../../frontend/dist');
 app.use(express.static(frontendBuildPath));
@@ -2077,7 +2083,7 @@ app.get('*', (req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Dockships API Server (SQLite Edition) running on port ${PORT}`);
+  console.log(`🚀 Dockships API Server running on port ${PORT}`);
   // Auto-simulate is disabled by default — real tracking via pixel tracker and Gmail poller is active
   // Uncomment the line below only for demo/testing purposes:
   // setInterval(automateEmailStatusShifting, 5000);
