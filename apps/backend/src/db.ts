@@ -533,15 +533,20 @@ async function seedDefaultData() {
       `);
       console.log('Default draft template seeded.');
     }
-    const checkUsers = await getRow<{ count: number }>('SELECT count(*) as count FROM dockships_users');
-    if (!checkUsers || checkUsers.count === 0) {
+    const adminEmail = 'contact@rollinhead.com';
+    const adminPassHash = await bcrypt.hash('admin123', 10);
+
+    const existingAdmin = await getRow<any>('SELECT id FROM dockships_users WHERE email = ?', [adminEmail]);
+    if (!existingAdmin) {
       const defaultId = crypto.randomUUID();
-      const defaultHash = await bcrypt.hash('password123', 10);
       await runQuery(
         'INSERT INTO dockships_users (id, email, password) VALUES (?, ?, ?)',
-        [defaultId, 'admin@dockships.com', defaultHash]
+        [defaultId, adminEmail, adminPassHash]
       );
-      console.log('Default admin user seeded (admin@dockships.com).');
+      console.log('Default final admin user seeded (contact@rollinhead.com / admin123).');
+    } else {
+      await runQuery('UPDATE dockships_users SET password = ? WHERE email = ?', [adminPassHash, adminEmail]);
+      console.log('Default final admin user updated (contact@rollinhead.com / admin123).');
     }
   } catch (draftsErr) {
     console.error('Error seeding default data:', draftsErr);
