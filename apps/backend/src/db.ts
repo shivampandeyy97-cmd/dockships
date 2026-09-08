@@ -7,7 +7,6 @@
 
 import sqlite3 from 'sqlite3';
 import path from 'path';
-import fs from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 
@@ -107,13 +106,18 @@ export async function initializeSchema(): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS dockships_smtp_settings (
       id TEXT PRIMARY KEY,
+      user_id TEXT UNIQUE,
       host TEXT,
       port INTEGER,
-      secure INTEGER DEFAULT 0,
-      user TEXT,
+      username TEXT,
+      password TEXT,
       pass TEXT,
+      sender_name TEXT,
+      sender_email TEXT,
       from_email TEXT,
       from_name TEXT,
+      active_service TEXT,
+      secure INTEGER DEFAULT 0,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -129,6 +133,7 @@ export async function initializeSchema(): Promise<void> {
       id TEXT PRIMARY KEY,
       webhook_url TEXT,
       channel TEXT,
+      bot_token TEXT,
       configured INTEGER DEFAULT 0,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
@@ -140,13 +145,15 @@ export async function initializeSchema(): Promise<void> {
       seller_type TEXT,
       domain TEXT NOT NULL,
       company_domain TEXT NOT NULL,
+      is_deleted INTEGER DEFAULT 0,
       domain_status TEXT DEFAULT 'pending',
       ads_txt_status TEXT DEFAULT 'pending',
       ads_detected TEXT DEFAULT 'pending',
       best_email TEXT,
       fetched_emails TEXT,
       crawled_at TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(company_domain, domain)
     );
 
     CREATE TABLE IF NOT EXISTS dockships_mm_campaigns (
