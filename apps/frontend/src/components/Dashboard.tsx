@@ -1373,12 +1373,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
           >
             {theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
           </button>
-          <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-            User: <strong style={{ color: 'var(--text-bright)' }}>{user.email}</strong>
-          </span>
-          <button className="btn btn-secondary" onClick={onLogout} style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
-            Logout
-          </button>
         </div>
       </header>
 

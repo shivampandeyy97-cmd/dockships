@@ -20,10 +20,6 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV NODE_ENV=production
 
-# SQLite DB path — stored inside the container at the backend directory.
-# On Render free plan this persists across hot-restarts within the same instance.
-# For cross-deploy persistence, upgrade to Render Starter and add a disk at /data.
-ENV DATABASE_PATH=/app/apps/backend/dockships.db
 
 # Install pnpm globally
 RUN npm install -g pnpm@11.4.0

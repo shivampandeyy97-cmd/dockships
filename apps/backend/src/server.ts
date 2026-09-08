@@ -337,16 +337,18 @@ app.get('/api/leads', async (req, res) => {
       created_at: string;
       sellers_companies?: string;
     }
-    const leads = await allRows<LeadRow>(`
-      SELECT l.*, 
-             (SELECT group_concat(DISTINCT company_domain) 
-              FROM dockships_sellers 
-              WHERE REPLACE(REPLACE(LOWER(domain), 'www.', ''), 'http://', '') = REPLACE(REPLACE(LOWER(l.website), 'www.', ''), 'http://', '')) as sellers_companies
-      FROM dockships_leads l
-      ORDER BY l.created_at DESC
-    `);
-    
-    const parsedLeads = leads.map(lead => parseLeadRow(lead));
+    const leads = await allRows<LeadRow>(`SELECT * FROM dockships_leads ORDER BY created_at DESC`);
+    const sellers = await allRows<{ company_domain: string; domain: string }>('SELECT company_domain, domain FROM dockships_sellers');
+
+    const parsedLeads = leads.map(lead => {
+      const cleanSite = (lead.website || '').toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./, '');
+      const matchedCompanies = [...new Set(
+        sellers
+          .filter(s => (s.domain || '').toLowerCase().replace(/^www\./, '') === cleanSite)
+          .map(s => s.company_domain)
+      )].join(',');
+      return { ...parseLeadRow(lead), sellers_companies: matchedCompanies || null };
+    });
 
     return res.json(parsedLeads);
   } catch (err: any) {
