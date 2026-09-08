@@ -1420,7 +1420,7 @@ async function crawlSellersBackground(companyDomain: string) {
   try {
     while (activeSellersCrawlers[companyDomain] === true) {
       const pendingSellers = await allRows<{ id: string, domain: string }>(
-        "SELECT id, domain FROM dockships_sellers WHERE company_domain = ? AND domain_status = 'pending' LIMIT 10",
+        "SELECT id, domain FROM dockships_sellers WHERE company_domain = ? AND domain_status = 'pending' LIMIT 3",
         [companyDomain]
       );
 
@@ -1483,7 +1483,7 @@ async function crawlSellersBackground(companyDomain: string) {
         }
       }));
 
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 1500));
     }
   } catch (err) {
     console.error(`[Sellers Crawl] Fatal error during sellers crawl for ${companyDomain}:`, err);
@@ -2087,6 +2087,11 @@ console.log(`📁 Serving frontend static files from: ${frontendBuildPath}`);
 
 app.use(express.static(frontendBuildPath));
 
+// Health check endpoint for Render
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
 // Fallback all other routes to React index.html for SPA routing
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) {
@@ -2100,10 +2105,16 @@ app.get('*', (req, res) => {
   }
 });
 
+// Global process exception guards to prevent unexpected container crashes
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Unhandled Rejection:', reason);
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Dockships API Server running on port ${PORT}`);
-  // Auto-simulate is disabled by default — real tracking via pixel tracker and Gmail poller is active
-  // Uncomment the line below only for demo/testing purposes:
-  // setInterval(automateEmailStatusShifting, 5000);
 });
