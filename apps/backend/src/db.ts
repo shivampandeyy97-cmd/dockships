@@ -195,14 +195,46 @@ export async function initializeSchema(): Promise<void> {
         return reject(err);
       }
       try {
+        await runMigrations();
         await seedDefaultData();
-        console.log('✅ SQLite Schema & Default Data initialized.');
+        console.log('✅ SQLite Schema, Migrations & Default Data initialized.');
         resolve();
       } catch (seedErr) {
         reject(seedErr);
       }
     });
   });
+}
+
+async function runMigrations() {
+  try {
+    const sellerCols = await allRows<any>("PRAGMA table_info(dockships_sellers)");
+    const sellerColNames = sellerCols.map(c => c.name);
+    if (!sellerColNames.includes('is_deleted')) {
+      await runQuery("ALTER TABLE dockships_sellers ADD COLUMN is_deleted INTEGER DEFAULT 0;");
+      console.log("✅ Migration: added is_deleted column to dockships_sellers");
+    }
+
+    // Ensure UNIQUE index on dockships_sellers(company_domain, domain)
+    await runQuery("CREATE UNIQUE INDEX IF NOT EXISTS idx_sellers_company_domain ON dockships_sellers(company_domain, domain);");
+
+    const smtpCols = await allRows<any>("PRAGMA table_info(dockships_smtp_settings)");
+    const smtpColNames = smtpCols.map(c => c.name);
+    if (!smtpColNames.includes('user_id')) {
+      await runQuery("ALTER TABLE dockships_smtp_settings ADD COLUMN user_id TEXT;");
+    }
+    if (!smtpColNames.includes('username')) {
+      await runQuery("ALTER TABLE dockships_smtp_settings ADD COLUMN username TEXT;");
+    }
+    if (!smtpColNames.includes('password')) {
+      await runQuery("ALTER TABLE dockships_smtp_settings ADD COLUMN password TEXT;");
+    }
+    if (!smtpColNames.includes('active_service')) {
+      await runQuery("ALTER TABLE dockships_smtp_settings ADD COLUMN active_service TEXT;");
+    }
+  } catch (err) {
+    console.error("⚠️ Migration execution warning:", err);
+  }
 }
 
 async function seedDefaultData() {
