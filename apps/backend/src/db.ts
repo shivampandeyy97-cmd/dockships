@@ -44,10 +44,152 @@ function now(): string {
 
 // ─── WHERE clause parser ──────────────────────────────────────────────────────
 
-/**
- * Parse a simple WHERE clause and return a filter function.
- * Handles: =, !=, <>, <, >, <=, >=, IS NULL, IS NOT NULL, LIKE, IN(...), NOT IN(...), AND
- */
+function parseSingleWhereClause(
+  clause: string,
+  params: any[],
+  getPi: () => number,
+  setPi: (n: number) => void
+): (row: Row) => boolean {
+  let trimmed = clause.trim();
+
+  // Strip outer parentheses if present around full clause
+  if (trimmed.startsWith('(') && trimmed.endsWith(')')) {
+    // Check if parentheses are balanced outer parens
+    let depth = 0;
+    let isOuter = true;
+    for (let i = 0; i < trimmed.length - 1; i++) {
+      if (trimmed[i] === '(') depth++;
+      else if (trimmed[i] === ')') depth--;
+      if (depth === 0 && i > 0) {
+        isOuter = false;
+        break;
+      }
+    }
+    if (isOuter) {
+      trimmed = trimmed.slice(1, -1).trim();
+    }
+  }
+
+  // Handle OR clauses: e.g. "col1 LIKE ? OR col2 LIKE ?"
+  if (/\s+OR\s+/i.test(trimmed)) {
+    const orParts = trimmed.split(/\s+OR\s+/i);
+    const subFns = orParts.map(part => parseSingleWhereClause(part, params, getPi, setPi));
+    return (row: Row) => subFns.some(fn => fn(row));
+  }
+
+  // col IN (?,?,?)
+  const inMatch = trimmed.match(/^(\w+)\s+IN\s*\(([^)]+)\)$/i);
+  if (inMatch) {
+    const col = inMatch[1];
+    const placeholders = inMatch[2].split(',').map((s: string) => s.trim());
+    const values: any[] = [];
+    for (const ph of placeholders) {
+      if (ph === '?') {
+        const cur = getPi();
+        values.push(params[cur]);
+        setPi(cur + 1);
+      } else {
+        values.push(ph.replace(/^['"]|['"]$/g, ''));
+      }
+    }
+    return (row) => values.includes(row[col]);
+  }
+
+  // col NOT IN (?,?,?)
+  const notInMatch = trimmed.match(/^(\w+)\s+NOT\s+IN\s*\(([^)]+)\)$/i);
+  if (notInMatch) {
+    const col = notInMatch[1];
+    const placeholders = notInMatch[2].split(',').map((s: string) => s.trim());
+    const values: any[] = [];
+    for (const ph of placeholders) {
+      if (ph === '?') {
+        const cur = getPi();
+        values.push(params[cur]);
+        setPi(cur + 1);
+      } else {
+        values.push(ph.replace(/^['"]|['"]$/g, ''));
+      }
+    }
+    return (row) => !values.includes(row[col]);
+  }
+
+  // col IS NULL
+  const isNullMatch = trimmed.match(/^(\w+)\s+IS\s+NULL$/i);
+  if (isNullMatch) {
+    const col = isNullMatch[1];
+    return (row) => row[col] == null;
+  }
+
+  // col IS NOT NULL
+  const isNotNullMatch = trimmed.match(/^(\w+)\s+IS\s+NOT\s+NULL$/i);
+  if (isNotNullMatch) {
+    const col = isNotNullMatch[1];
+    return (row) => row[col] != null;
+  }
+
+  // col = ?  or  col != ?  etc.
+  const cmpMatch = trimmed.match(/^(\w+)\s*(=|!=|<>|>=|<=|>|<)\s*\?$/i);
+  if (cmpMatch) {
+    const col = cmpMatch[1];
+    const op = cmpMatch[2];
+    const cur = getPi();
+    const val = params[cur];
+    setPi(cur + 1);
+    return (row) => {
+      const rv = row[col];
+      switch (op) {
+        case '=':  return rv == val;
+        case '!=': return rv != val;
+        case '<>': return rv != val;
+        case '>':  return rv > val;
+        case '<':  return rv < val;
+        case '>=': return rv >= val;
+        case '<=': return rv <= val;
+        default:   return false;
+      }
+    };
+  }
+
+  // col = 'literal'
+  const litMatch = trimmed.match(/^(\w+)\s*=\s*'([^']*)'$/i);
+  if (litMatch) {
+    const col = litMatch[1];
+    const val = litMatch[2];
+    return (row) => String(row[col] ?? '') === val;
+  }
+
+  // col LIKE ?
+  const likeMatch = trimmed.match(/^(\w+)\s+LIKE\s+\?$/i);
+  if (likeMatch) {
+    const col = likeMatch[1];
+    const cur = getPi();
+    const rawPattern = params[cur];
+    setPi(cur + 1);
+    const pattern = String(rawPattern ?? '').replace(/%/g, '.*').replace(/_/g, '.');
+    const regex = new RegExp(`^${pattern}$`, 'i');
+    return (row) => regex.test(String(row[col] ?? ''));
+  }
+
+  // col LIKE 'pattern'
+  const likeLitMatch = trimmed.match(/^(\w+)\s+LIKE\s+'([^']*)'$/i);
+  if (likeLitMatch) {
+    const col = likeLitMatch[1];
+    const pattern = likeLitMatch[2].replace(/%/g, '.*').replace(/_/g, '.');
+    const regex = new RegExp(`^${pattern}$`, 'i');
+    return (row) => regex.test(String(row[col] ?? ''));
+  }
+
+  // status IN ('a', 'b', ...) — literal IN list
+  const litInMatch = trimmed.match(/^(\w+)\s+IN\s*\((.+)\)$/i);
+  if (litInMatch) {
+    const col = litInMatch[1];
+    const values = litInMatch[2].split(',').map((v: string) => v.trim().replace(/^['"]|['"]$/g, ''));
+    return (row) => values.includes(String(row[col] ?? ''));
+  }
+
+  return () => true;
+}
+
 function buildWhereFilter(
   whereClause: string,
   params: any[],
@@ -56,105 +198,32 @@ function buildWhereFilter(
   let pi = startIdx;
   const conditions: Array<(row: Row) => boolean> = [];
 
-  const parts = whereClause.split(/\s+AND\s+/i);
+  // Split on top-level AND (ignoring AND inside parens)
+  const parts: string[] = [];
+  let depth = 0;
+  let cur = '';
+  const tokens = whereClause.split(/(\s+AND\s+)/i);
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (/^\s+AND\s+$/i.test(t) && depth === 0) {
+      if (cur.trim()) parts.push(cur.trim());
+      cur = '';
+    } else {
+      for (const ch of t) {
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+      }
+      cur += t;
+    }
+  }
+  if (cur.trim()) parts.push(cur.trim());
+
+  const getPi = () => pi;
+  const setPi = (n: number) => { pi = n; };
 
   for (const part of parts) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-
-    // col IN (?,?,?)
-    const inMatch = trimmed.match(/^(\w+)\s+IN\s*\(([^)]+)\)$/i);
-    if (inMatch) {
-      const col = inMatch[1];
-      const placeholders = inMatch[2].split(',').map((s: string) => s.trim());
-      const values: any[] = [];
-      for (const ph of placeholders) {
-        if (ph === '?') values.push(params[pi++]);
-        else values.push(ph.replace(/^['"]|['"]$/g, ''));
-      }
-      conditions.push((row) => values.includes(row[col]));
-      continue;
-    }
-
-    // col NOT IN (?,?,?)
-    const notInMatch = trimmed.match(/^(\w+)\s+NOT\s+IN\s*\(([^)]+)\)$/i);
-    if (notInMatch) {
-      const col = notInMatch[1];
-      const placeholders = notInMatch[2].split(',').map((s: string) => s.trim());
-      const values: any[] = [];
-      for (const ph of placeholders) {
-        if (ph === '?') values.push(params[pi++]);
-        else values.push(ph.replace(/^['"]|['"]$/g, ''));
-      }
-      conditions.push((row) => !values.includes(row[col]));
-      continue;
-    }
-
-    // col IS NULL
-    const isNullMatch = trimmed.match(/^(\w+)\s+IS\s+NULL$/i);
-    if (isNullMatch) {
-      const col = isNullMatch[1];
-      conditions.push((row) => row[col] == null);
-      continue;
-    }
-
-    // col IS NOT NULL
-    const isNotNullMatch = trimmed.match(/^(\w+)\s+IS\s+NOT\s+NULL$/i);
-    if (isNotNullMatch) {
-      const col = isNotNullMatch[1];
-      conditions.push((row) => row[col] != null);
-      continue;
-    }
-
-    // col = ?  or  col != ?  etc.
-    const cmpMatch = trimmed.match(/^(\w+)\s*(=|!=|<>|>=|<=|>|<)\s*\?$/i);
-    if (cmpMatch) {
-      const col = cmpMatch[1];
-      const op = cmpMatch[2];
-      const val = params[pi++];
-      conditions.push((row) => {
-        const rv = row[col];
-        switch (op) {
-          case '=':  return rv == val;
-          case '!=': return rv != val;
-          case '<>': return rv != val;
-          case '>':  return rv > val;
-          case '<':  return rv < val;
-          case '>=': return rv >= val;
-          case '<=': return rv <= val;
-          default:   return false;
-        }
-      });
-      continue;
-    }
-
-    // col = 'literal'
-    const litMatch = trimmed.match(/^(\w+)\s*=\s*'([^']*)'$/i);
-    if (litMatch) {
-      const col = litMatch[1];
-      const val = litMatch[2];
-      conditions.push((row) => String(row[col] ?? '') === val);
-      continue;
-    }
-
-    // col LIKE ?
-    const likeMatch = trimmed.match(/^(\w+)\s+LIKE\s+\?$/i);
-    if (likeMatch) {
-      const col = likeMatch[1];
-      const pattern = String(params[pi++]).replace(/%/g, '.*').replace(/_/g, '.');
-      const regex = new RegExp(`^${pattern}$`, 'i');
-      conditions.push((row) => regex.test(String(row[col] ?? '')));
-      continue;
-    }
-
-    // status IN ('a', 'b', ...) — literal IN list
-    const litInMatch = trimmed.match(/^(\w+)\s+IN\s*\((.+)\)$/i);
-    if (litInMatch) {
-      const col = litInMatch[1];
-      const values = litInMatch[2].split(',').map((v: string) => v.trim().replace(/^['"]|['"]$/g, ''));
-      conditions.push((row) => values.includes(String(row[col] ?? '')));
-      continue;
-    }
+    const fn = parseSingleWhereClause(part, params, getPi, setPi);
+    conditions.push(fn);
   }
 
   const filter = (row: Row) => conditions.every(fn => fn(row));

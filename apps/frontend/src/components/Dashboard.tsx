@@ -222,7 +222,7 @@ function safeParseEmails(emailsInput: any): string[] {
   return [];
 }
 
-export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
+export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout: _onLogout }) => {
   const [activeTab, setActiveTab] = useState<'leads' | 'logs' | 'settings' | 'templates' | 'agent' | 'sellers' | 'mailmerge'>('leads');
 
   // Sellers states
@@ -419,7 +419,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
     const csvContent = [
       headers.join(','),
-      ...rows.map(row => row.map(val => `"${val.replace(/"/g, '""')}"`).join(','))
+      ...rows.map(row => row.map(val => `"${String(val ?? '').replace(/"/g, '""')}"`).join(','))
     ].join('\n');
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -608,13 +608,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
         return res.json();
       })
       .then(data => {
-        const rows = data.sellers.map((s: any) => {
+        const sellersList = data?.sellers || [];
+        if (sellersList.length === 0) {
+          alert("No sellers data available to export.");
+          return;
+        }
+
+        const rows = sellersList.map((s: any) => {
           const emailsListStr = safeParseEmails(s.fetched_emails).join('; ');
           return [
             s.seller_id || '',
             s.name || '',
             s.seller_type || '',
-            s.domain,
+            s.domain || '',
             s.domain_status || 'pending',
             s.ads_txt_status || 'pending',
             s.ads_detected || 'pending',
@@ -626,7 +632,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onLogout }) => {
 
         const csvContent = [
           headers.join(','),
-          ...rows.map((row: any) => row.map((val: any) => `"${val.replace(/"/g, '""')}"`).join(','))
+          ...rows.map((row: any[]) => row.map((val: any) => `"${String(val ?? '').replace(/"/g, '""')}"`).join(','))
         ].join('\n');
 
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
