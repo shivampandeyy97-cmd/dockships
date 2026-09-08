@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import path from 'path';
+import fs from 'fs';
 import axios from 'axios';
 import { initializeSchema, runQuery, getRow, allRows, SUPABASE_SCHEMA_SQL } from './db';
 import { crawlWebsite, checkAdsTxt } from './services/crawler';
@@ -2072,15 +2073,31 @@ app.get('/api/schema', (_req, res) => {
 });
 
 // Serve frontend static assets in production
-const frontendBuildPath = path.resolve(__dirname, '../../frontend/dist');
+const possibleFrontendPaths = [
+  path.resolve(__dirname, '../../../apps/frontend/dist'),
+  path.resolve(__dirname, '../../frontend/dist'),
+  path.resolve(process.cwd(), 'apps/frontend/dist'),
+  path.resolve(process.cwd(), 'frontend/dist'),
+  path.resolve(process.cwd(), '../frontend/dist')
+];
+
+const frontendBuildPath = possibleFrontendPaths.find(p => fs.existsSync(path.join(p, 'index.html'))) || possibleFrontendPaths[0];
+
+console.log(`📁 Serving frontend static files from: ${frontendBuildPath}`);
+
 app.use(express.static(frontendBuildPath));
 
 // Fallback all other routes to React index.html for SPA routing
-app.get('*', (req, res, next) => {
+app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) {
-    return next();
+    return res.status(404).json({ error: `API endpoint not found: ${req.method} ${req.path}` });
   }
-  res.sendFile(path.join(frontendBuildPath, 'index.html'));
+  const indexPath = path.join(frontendBuildPath, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).send('Frontend build not found. Please build the project.');
+  }
 });
 
 // Start server

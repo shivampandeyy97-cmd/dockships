@@ -9,7 +9,7 @@ interface User {
 // Default user — no login required, app is publicly accessible
 const DEFAULT_USER: User = {
   id: 'default-user',
-  email: 'contact@rollinhead.com'
+  email: 'admin@dockships.com'
 };
 
 function App() {
