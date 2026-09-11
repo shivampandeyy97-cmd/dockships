@@ -383,8 +383,8 @@ app.post('/api/leads', async (req, res) => {
       [leadId, cleanUrl, manualEmail ? manualEmail.trim() : null, pocName ? pocName.trim() : null]
     );
 
-    // Trigger crawler & validator in background
-    runBackgroundCrawl(leadId, cleanUrl);
+    // Trigger crawler & validator via background queue
+    enqueueCrawl(leadId, cleanUrl);
 
     const createdLead = {
       id: leadId,
@@ -453,7 +453,7 @@ app.post('/api/leads/bulk', async (req, res) => {
       );
 
       if (ds === 'pending') {
-        runBackgroundCrawl(leadId, cleanUrl);
+        enqueueCrawl(leadId, cleanUrl);
       }
       results.push({ website, status: 'created', id: leadId });
     } catch (err: any) {
@@ -759,6 +759,44 @@ app.patch('/api/emails/:emailId/status', async (req, res) => {
   }
 });
 
+
+// Concurrency-Controlled Background Crawl Queue (prevents OOM & CPU starvation on Render)
+interface CrawlTask {
+  leadId: string;
+  websiteUrl: string;
+}
+
+const crawlQueue: CrawlTask[] = [];
+let activeCrawls = 0;
+const MAX_CONCURRENT_CRAWLS = 2; // Strict concurrency limit for low-memory containers
+
+function enqueueCrawl(leadId: string, websiteUrl: string) {
+  if (!crawlQueue.some(t => t.leadId === leadId)) {
+    crawlQueue.push({ leadId, websiteUrl });
+  }
+  processCrawlQueue();
+}
+
+async function processCrawlQueue() {
+  if (activeCrawls >= MAX_CONCURRENT_CRAWLS || crawlQueue.length === 0) {
+    return;
+  }
+
+  const task = crawlQueue.shift();
+  if (!task) return;
+
+  activeCrawls++;
+  console.log(`[CrawlQueue] Starting crawl for ${task.websiteUrl} (${task.leadId}). Remaining in queue: ${crawlQueue.length}`);
+
+  try {
+    await runBackgroundCrawl(task.leadId, task.websiteUrl);
+  } catch (err: any) {
+    console.error(`[CrawlQueue] Unhandled error processing ${task.leadId}:`, err?.message || err);
+  } finally {
+    activeCrawls--;
+    setTimeout(processCrawlQueue, 200);
+  }
+}
 
 // Background crawl handler
 async function runBackgroundCrawl(leadId: string, websiteUrl: string) {

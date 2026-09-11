@@ -15,8 +15,6 @@ const BOUNCE_RISK_PREFIXES = [
   'reply', 'noreply',
 ];
 
-// Priority scoring: higher = better candidate
-// Prioritizes known contact aliases, then generic people aliases
 const EMAIL_PRIORITY: Record<string, number> = {
   contact: 100,
   hello: 98,
@@ -51,58 +49,46 @@ const EMAIL_PRIORITY: Record<string, number> = {
 };
 
 /**
- * Validates that an email domain has MX records (can actually receive email).
- * Uses a short timeout to prevent hanging in bulk crawls.
- * Returns true if domain has valid MX records, false otherwise.
+ * Validates that an email domain has MX records (can receive email).
+ * Strictly bounded with a 2-second timeout to prevent hanging worker threads.
  */
 export async function validateEmailDomain(email: string): Promise<boolean> {
   try {
     const domain = email.split('@')[1];
     if (!domain) return false;
 
-    // DNS lookups can hang — wrap in a race with a timeout
-    const mxPromise = resolveMx(domain);
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('DNS timeout')), 5000)
-    );
+    let timer: NodeJS.Timeout | null = null;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('DNS timeout')), 2000);
+    });
 
-    const records = await Promise.race([mxPromise, timeoutPromise]);
-    return Array.isArray(records) && records.length > 0;
+    try {
+      const records = await Promise.race([resolveMx(domain), timeoutPromise]);
+      return Array.isArray(records) && records.length > 0;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   } catch {
-    // DNS lookup failure = domain likely invalid / doesn't exist
     return false;
   }
 }
 
-/**
- * Filters out emails that are high-risk (noreply, system addresses, etc.)
- */
 export function filterBounceRiskEmails(emails: string[]): string[] {
   return emails.filter(email => {
     const lower = email.toLowerCase().trim();
-
-    // Filter Sentry and other error-tracking noise
     if (lower.includes('sentry')) return false;
 
     const parts = lower.split('@');
     if (parts.length < 2) return false;
 
     const localPart = parts[0];
-
-    // Filter hash/token local parts
     if (/^[0-9a-f]{20,}$/i.test(localPart)) return false;
 
-    // Strip non-alpha for prefix comparison
     const localAlpha = localPart.replace(/[^a-z]/g, '');
     return !BOUNCE_RISK_PREFIXES.some(prefix => localAlpha === prefix || localAlpha.startsWith(prefix));
   });
 }
 
-/**
- * Scores a list of candidate emails and returns the single best one.
- * Priority: known contact aliases (contact@, info@) > generic person emails.
- * Returns null if the list is empty.
- */
 export function scoreCandidateEmails(emails: string[]): string | null {
   if (emails.length === 0) return null;
   if (emails.length === 1) return emails[0];
@@ -112,7 +98,7 @@ export function scoreCandidateEmails(emails: string[]): string | null {
 
   for (const email of emails) {
     const local = email.split('@')[0].toLowerCase();
-    const score = EMAIL_PRIORITY[local] ?? 10; // default low score for personal/unknown emails
+    const score = EMAIL_PRIORITY[local] ?? 10;
 
     if (score > bestScore) {
       bestScore = score;
@@ -123,34 +109,19 @@ export function scoreCandidateEmails(emails: string[]): string | null {
   return bestEmail;
 }
 
-/**
- * Full pipeline: filter bounce risks, score candidates, validate domain via DNS MX.
- * Returns the single best valid email, or null if none passes validation.
- *
- * Strategy:
- * 1. Remove bounce-risk emails
- * 2. Sort by priority score
- * 3. DNS MX validate top 5 candidates (not just top 3)
- * 4. Fallback: return best scored without MX validation (avoids losing real emails)
- */
 export async function selectBestEmail(emails: string[]): Promise<string | null> {
   if (emails.length === 0) return null;
 
-  // Step 1: Remove bounce-risk emails
   const filtered = filterBounceRiskEmails(emails);
-  const pool = filtered.length > 0 ? filtered : emails; // fallback to all if all filtered
+  const pool = filtered.length > 0 ? filtered : emails;
 
-  // Step 2: Score and sort
   const sorted = [...pool].sort((a, b) => {
     const la = a.split('@')[0].toLowerCase();
     const lb = b.split('@')[0].toLowerCase();
     return (EMAIL_PRIORITY[lb] ?? 10) - (EMAIL_PRIORITY[la] ?? 10);
   });
 
-  // Step 3: DNS MX validate top candidates (up to 5)
-  const topCandidates = sorted.slice(0, 5);
-
-  // Group by domain to avoid redundant DNS lookups
+  const topCandidates = sorted.slice(0, 3);
   const domainValidCache = new Map<string, boolean>();
 
   for (const email of topCandidates) {
@@ -168,7 +139,5 @@ export async function selectBestEmail(emails: string[]): Promise<string | null> 
     }
   }
 
-  // Step 4: Fallback — return best scored email even without MX validation
-  // This ensures we don't lose real emails just because DNS is slow or blocked
   return sorted[0] || null;
 }
