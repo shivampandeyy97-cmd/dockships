@@ -1,6 +1,17 @@
 packages:
   - 'apps/*'
+
 allowBuilds:
+  bcryptjs: true
+  better-sqlite3: true
   puppeteer: true
   sqlite3: true
-  bcryptjs: true
+  unrs-resolver: true
+
+onlyBuiltDependencies:
+  - puppeteer
+  - sqlite3
+  - bcryptjs
+  - better-sqlite3
+  - unrs-resolver
+

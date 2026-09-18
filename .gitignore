@@ -1,9 +1,12 @@
 node_modules/
 dist/
 *.db
+*.db-shm
+*.db-wal
 *.local
 .env
 .DS_Store
 .system_generated/
 .gemini/
 *.log
+
