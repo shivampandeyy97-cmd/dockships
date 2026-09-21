@@ -446,7 +446,8 @@ export default function FreeGTMPage() {
     if (!domain.trim()) return;
     setError('');
     setRunning(true);
-    setJobStatus(null);
+    // NOTE: Do NOT clear jobStatus here — keeps old results visible
+    // while the new job spins up, preventing jarring screen wipe.
     setJobId(null);
 
     try {
@@ -457,11 +458,24 @@ export default function FreeGTMPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to start pipeline');
+      // Clear old results only once we have a new job ID
+      setJobStatus(null);
       setJobId(data.jobId);
     } catch (err: any) {
       setError(err.message);
       setRunning(false);
     }
+  };
+
+  const handleExportCSV = () => {
+    if (!jobId) return;
+    // Trigger browser download via the export API
+    const link = document.createElement('a');
+    link.href = `/api/pipeline/export/${jobId}`;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleDraftAction = async (draftId: string, action: 'approved' | 'rejected') => {
@@ -624,7 +638,7 @@ export default function FreeGTMPage() {
           {(jobStatus || running) && (
             <>
               {/* Job Header */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 24 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, marginBottom: 24 }}>
                 <div>
                   <h2 style={{ fontSize: '1.3rem', fontWeight: 800, color: '#f1f5f9' }}>
                     {jobStatus?.domain || domain}
@@ -635,6 +649,24 @@ export default function FreeGTMPage() {
                     {isFailed && <span style={{ color: '#f87171' }}>Pipeline failed: {jobStatus?.progress?.error}</span>}
                   </div>
                 </div>
+                {isDone && (
+                  <button
+                    id="export-csv-btn"
+                    onClick={handleExportCSV}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '8px 16px', borderRadius: 10, cursor: 'pointer',
+                      background: 'rgba(16,185,129,0.12)', color: '#34d399',
+                      fontSize: '0.82rem', fontWeight: 600, fontFamily: 'inherit',
+                      border: '1px solid rgba(16,185,129,0.25)',
+                      transition: 'all 0.15s ease',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(16,185,129,0.22)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'rgba(16,185,129,0.12)')}
+                  >
+                    ⬇ Export CSV
+                  </button>
+                )}
               </div>
 
               {/* Tabs */}
@@ -687,18 +719,30 @@ export default function FreeGTMPage() {
                 </>
               )}
 
-              {/* Running skeleton */}
-              {running && !isDone && [1, 2, 3].map(i => (
-                <div key={i} className="glass-card" style={{ padding: 20, marginBottom: 12, opacity: 0.4 }}>
-                  <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
-                    <div style={{ width: 42, height: 42, borderRadius: 10, background: 'rgba(255,255,255,0.05)' }} />
-                    <div style={{ flex: 1 }}>
-                      <div style={{ height: 14, borderRadius: 4, background: 'rgba(255,255,255,0.06)', marginBottom: 6, width: '40%' }} />
-                      <div style={{ height: 10, borderRadius: 4, background: 'rgba(255,255,255,0.04)', width: '60%' }} />
+              {/* Running skeleton — animate in only if no prior results */}
+              {running && !isDone && (
+                <div style={{ marginTop: 8 }}>
+                  {[1, 2, 3].map(i => (
+                    <div
+                      key={i}
+                      className="glass-card"
+                      style={{
+                        padding: 20, marginBottom: 12,
+                        opacity: 0.35,
+                        animation: `pulse ${1.2 + i * 0.2}s ease-in-out infinite`,
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+                        <div style={{ width: 42, height: 42, borderRadius: 10, background: 'rgba(255,255,255,0.05)' }} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ height: 14, borderRadius: 4, background: 'rgba(255,255,255,0.06)', marginBottom: 6, width: `${35 + i * 8}%` }} />
+                          <div style={{ height: 10, borderRadius: 4, background: 'rgba(255,255,255,0.04)', width: `${50 + i * 5}%` }} />
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </>
           )}
         </div>

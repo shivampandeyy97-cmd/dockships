@@ -71,6 +71,26 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ jobId });
 }
 
+/** Run up to `concurrency` async tasks at once */
+async function pLimit<T>(
+  tasks: (() => Promise<T>)[],
+  concurrency: number
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < tasks.length) {
+      const i = nextIndex++;
+      results[i] = await tasks[i]();
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
 async function runPipeline(
   jobId: string,
   domain: string,
@@ -114,7 +134,8 @@ async function runPipeline(
     googlePlacesApiKey: config.googlePlacesKey,
   }, 10);
 
-  // Insert prospects into DB
+  // Insert prospects into DB and build id map
+  const prospectIds: Record<string, string> = {};
   for (const p of prospects) {
     const pId = uuidv4();
     dbRun(
@@ -122,52 +143,67 @@ async function runPipeline(
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [pId, jobId, p.company_name, p.company_domain || '', p.company_description || '', p.industry || '', p.company_size || '', p.contact_name || '', p.contact_title || '', p.source]
     );
+    prospectIds[p.company_name] = pId;
   }
 
-  // ─── Stage 4 + 5: Email Finder & Writer (per prospect) ────────────────────────
-  for (let i = 0; i < prospects.length; i++) {
-    const p = prospects[i];
-    const prospectRow = dbGet<any>(
-      'SELECT * FROM freegtm_prospects WHERE job_id = ? AND company_name = ? LIMIT 1',
-      [jobId, p.company_name]
-    );
-    if (!prospectRow) continue;
+  // ─── Stage 4: Email Finder (parallelized, max 4 concurrent) ─────────────────
+  updateProgress(4, 'Email Finder', `Finding emails for ${prospects.length} prospects (parallel)…`);
 
-    // Stage 4: Email Finder
-    updateProgress(4, 'Email Finder', `Finding email for ${p.company_name} (${i + 1}/${prospects.length})…`);
+  let emailsFound = 0;
+  const emailTasks = prospects.map((p, i) => async () => {
+    const pId = prospectIds[p.company_name];
+    if (!pId) return;
+
     const emailResult = await findEmail(p, { hunterApiKey: config.hunterKey });
 
     if (emailResult.email) {
+      emailsFound++;
       dbRun(
         'UPDATE freegtm_prospects SET contact_email = ?, email_confidence = ?, email_source = ? WHERE id = ?',
-        [emailResult.email, emailResult.confidence, emailResult.source, prospectRow.id]
+        [emailResult.email, emailResult.confidence, emailResult.source, pId]
       );
     }
 
-    // Stage 5: Email Writer
-    updateProgress(5, 'Email Writer', `Drafting personalized email for ${p.company_name}…`);
+    // Update progress message as each email resolves
+    updateProgress(4, 'Email Finder',
+      `Found ${emailsFound} emails for ${prospects.length} prospects… (${i + 1}/${prospects.length} checked)`);
+  });
+
+  await pLimit(emailTasks, 4); // 4 concurrent email lookups
+
+  // ─── Stage 5: Email Writer (parallelized, max 3 concurrent) ─────────────────
+  updateProgress(5, 'Email Writer', `Drafting personalized emails for ${prospects.length} prospects…`);
+
+  let draftsWritten = 0;
+  const emailWriterTasks = prospects.map((p, i) => async () => {
+    const pId = prospectIds[p.company_name];
+    if (!pId) return;
+
     try {
       const draft = await writeEmail(p, icp, config.senderName, config.senderCompany, config.senderDomain, llmSettings);
       const draftId = uuidv4();
       dbRun(
         `INSERT INTO freegtm_drafts (id, prospect_id, job_id, subject, body, personalization_note)
          VALUES (?, ?, ?, ?, ?, ?)`,
-        [draftId, prospectRow.id, jobId, draft.subject, draft.body, draft.personalization_note]
+        [draftId, pId, jobId, draft.subject, draft.body, draft.personalization_note]
       );
+      draftsWritten++;
+      updateProgress(5, 'Email Writer',
+        `Drafted ${draftsWritten}/${prospects.length} emails…`);
     } catch (err: any) {
       console.warn(`[Pipeline] Email writer failed for ${p.company_name}:`, err.message);
     }
+  });
 
-    // Small delay to avoid rate-limiting LLM APIs
-    await new Promise(r => setTimeout(r, 300));
-  }
+  // LLM APIs usually rate-limit — keep concurrency low for email writer
+  await pLimit(emailWriterTasks, 2);
 
   // ─── Done ────────────────────────────────────────────────────────────────────
   dbRun("UPDATE freegtm_jobs SET status = 'completed', updated_at = datetime('now') WHERE id = ?", [jobId]);
   jobProgress[jobId] = {
     stage: 5,
     stageName: 'Complete',
-    message: `Pipeline complete! Found ${prospects.length} prospects with drafted emails ready for review.`,
+    message: `Pipeline complete! Found ${prospects.length} prospects with ${draftsWritten} email drafts ready for review.`,
     done: true,
   };
 }
