@@ -411,11 +411,16 @@ export default function FreeGTMPage() {
   const [domain, setDomain] = useState('');
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
+  // Separate lightweight progress state — updated every poll tick.
+  // Kept separate from jobStatus so skeleton cards never re-render during polling.
+  const [progressInfo, setProgressInfo] = useState<Progress | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [activeTab, setActiveTab] = useState<'prospects' | 'icp'>('prospects');
   const pollRef = useRef<NodeJS.Timeout | null>(null);
+  // Track last seen stage so we only update jobStatus when stage actually advances
+  const lastStageRef = useRef<number>(-1);
 
   // ─── Polling ──────────────────────────────────────────────────────────────
 
@@ -424,9 +429,22 @@ export default function FreeGTMPage() {
       const res = await fetch(`/api/pipeline/status/${id}`);
       if (!res.ok) return;
       const data: JobStatus = await res.json();
-      setJobStatus(data);
 
-      if (data.progress?.done || data.status === 'completed' || data.status === 'failed') {
+      // Always update the lightweight progress bar / message (causes no skeleton flicker)
+      setProgressInfo(data.progress);
+
+      const isDone = data.progress?.done || data.status === 'completed' || data.status === 'failed';
+      const stageChanged = data.progress?.stage !== lastStageRef.current;
+
+      // Only update full jobStatus when:
+      //   • The stage number actually advances (not every tick)
+      //   • The job is done (load final results once)
+      if (stageChanged || isDone) {
+        lastStageRef.current = data.progress?.stage ?? -1;
+        setJobStatus(data);
+      }
+
+      if (isDone) {
         setRunning(false);
         if (pollRef.current) clearInterval(pollRef.current);
       }
@@ -435,6 +453,7 @@ export default function FreeGTMPage() {
 
   useEffect(() => {
     if (!jobId) return;
+    lastStageRef.current = -1;
     pollRef.current = setInterval(() => pollStatus(jobId), 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [jobId, pollStatus]);
@@ -460,6 +479,7 @@ export default function FreeGTMPage() {
       if (!res.ok) throw new Error(data.error || 'Failed to start pipeline');
       // Clear old results only once we have a new job ID
       setJobStatus(null);
+      setProgressInfo(null);
       setJobId(data.jobId);
     } catch (err: any) {
       setError(err.message);
@@ -489,7 +509,9 @@ export default function FreeGTMPage() {
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
-  const progress = jobStatus?.progress;
+  // Use progressInfo for stage timeline + message (updates every tick, lightweight)
+  // Use jobStatus for results panel (only updates on stage change / completion)
+  const progress = progressInfo ?? jobStatus?.progress;
   const isDone = !!(progress?.done && jobStatus?.status === 'completed');
   const isFailed = jobStatus?.status === 'failed';
   const currentStage = progress?.stage || 0;
