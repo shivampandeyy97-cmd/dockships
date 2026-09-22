@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { API_URL } from '../config';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -136,6 +136,14 @@ export const Dashboard: React.FC = () => {
   // Export loading
   const [exporting, setExporting] = useState(false);
 
+  // Track whether a fetch is a silent background poll (no loading spinner)
+  const isPollingRef = useRef(false);
+  // Track the crawling state in a ref so the polling interval doesn't need
+  // to be restarted every time stats.crawling flips
+  const crawlingRef = useRef(false);
+  const selectedCompanyRef = useRef('');
+  const pageRef = useRef(1);
+
   // ─── Data fetching ──────────────────────────────────────────────────────────
 
   const fetchCompanies = useCallback(async () => {
@@ -152,10 +160,11 @@ export const Dashboard: React.FC = () => {
 
   const fetchSellers = useCallback(async (
     company: string, pageNum: number,
-    searchVal = search, domFilt = domainFilter, adsFilt = adsTxtFilter
+    searchVal = search, domFilt = domainFilter, adsFilt = adsTxtFilter,
+    silent = false  // true = background poll, no loading spinner
   ) => {
     if (!company) return;
-    setLoadingSellers(true);
+    if (!silent) setLoadingSellers(true);
     try {
       const params = new URLSearchParams({
         companyDomain: company,
@@ -168,14 +177,22 @@ export const Dashboard: React.FC = () => {
       const res = await fetch(`${API_URL}/api/sellers?${params}`);
       if (res.ok) {
         const data = await res.json();
-        setSellers(data.sellers);
+        // Always update stats (number counters) — these are lightweight
         setStats(data.stats);
+        crawlingRef.current = data.stats.crawling;
+        // Only replace the sellers array if it actually changed
+        // (avoids React re-rendering every row on every poll tick)
+        setSellers(prev => {
+          const newJson = JSON.stringify(data.sellers);
+          const prevJson = JSON.stringify(prev);
+          return newJson === prevJson ? prev : data.sellers;
+        });
         setPagination(data.pagination);
       }
     } catch (e) {
       console.error('Error loading sellers:', e);
     } finally {
-      setLoadingSellers(false);
+      if (!silent) setLoadingSellers(false);
     }
   }, [search, domainFilter, adsTxtFilter]);
 
@@ -187,18 +204,36 @@ export const Dashboard: React.FC = () => {
     if (crawledCompanies.length > 0 && !selectedCompany) {
       const first = crawledCompanies[0];
       setSelectedCompany(first);
+      selectedCompanyRef.current = first;
       fetchSellers(first, 1, '', 'all', 'all');
     }
   }, [crawledCompanies]);
 
-  // Poll when crawling is active
+  // Keep refs in sync with state for use inside the polling interval
   useEffect(() => {
-    if (!stats.crawling || !selectedCompany) return;
-    const id = setInterval(() => fetchSellers(selectedCompany, page), 3000);
-    return () => clearInterval(id);
-  }, [stats.crawling, selectedCompany, page]);
+    selectedCompanyRef.current = selectedCompany;
+  }, [selectedCompany]);
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+  useEffect(() => {
+    crawlingRef.current = stats.crawling;
+  }, [stats.crawling]);
 
-  // Re-fetch on filter / page changes
+  // Single long-lived polling interval — never restarts.
+  // Reads current values via refs so no dependency churn.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (crawlingRef.current && selectedCompanyRef.current) {
+        // Silent poll: no loading spinner, no table blink
+        fetchSellers(selectedCompanyRef.current, pageRef.current,
+          undefined, undefined, undefined, true);
+      }
+    }, 3000);
+    return () => clearInterval(id);
+  }, [fetchSellers]); // only re-creates if fetchSellers itself changes (filter change)
+
+  // Re-fetch on filter / page changes (non-silent, shows loader)
   useEffect(() => {
     if (selectedCompany) fetchSellers(selectedCompany, page);
   }, [selectedCompany, page, domainFilter, adsTxtFilter]);
@@ -241,6 +276,7 @@ export const Dashboard: React.FC = () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ companyDomain: selectedCompany })
     });
+    crawlingRef.current = true;
     setStats(prev => ({ ...prev, crawling: true }));
     fetchSellers(selectedCompany, page);
   };
@@ -252,6 +288,7 @@ export const Dashboard: React.FC = () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ companyDomain: selectedCompany })
     });
+    crawlingRef.current = false;
     setStats(prev => ({ ...prev, crawling: false }));
   };
 
@@ -671,7 +708,7 @@ export const Dashboard: React.FC = () => {
 
             {/* Table */}
             <div style={S.tableWrapper}>
-              {loadingSellers ? (
+              {loadingSellers && sellers.length === 0 ? (
                 <div style={S.emptyState}>
                   <div style={{ ...S.dot, margin: '0 auto 12px', width: 12, height: 12 }} />
                   <p style={{ color: '#6b7280', fontSize: '0.9rem' }}>Loading sellers…</p>
