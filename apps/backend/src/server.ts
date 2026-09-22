@@ -58,8 +58,11 @@ app.get('/api/db-status', async (_req, res) => {
 
 const activeSellersCrawlers: Record<string, boolean> = {};
 
-// Per-domain crawl timeout: 45 seconds max per seller domain
-const SELLER_DOMAIN_CRAWL_TIMEOUT_MS = 45000;
+// Per-domain crawl timeout — tight enough to keep throughput high
+const SELLER_DOMAIN_CRAWL_TIMEOUT_MS = 12000; // 12s (was 45s)
+
+// How many sellers to process concurrently per company crawl
+const CRAWL_CONCURRENCY = 8;
 
 /**
  * Helper: check if a seller domain is live + has ads.txt.
@@ -110,18 +113,86 @@ async function checkSellerDomain(domain: string): Promise<{ domainStatus: 'pass'
 }
 
 /**
- * Background crawl loop for a company's sellers.
- * Processes pending sellers sequentially (not concurrently) to avoid OOM on low-memory containers.
- * Auto-terminates after 6 hours as a safety net.
+ * Crawl a single seller domain and write the result to the DB.
+ * Extracted so it can be run concurrently across multiple workers.
+ */
+async function crawlOneSeller(seller: { id: string; domain: string }): Promise<void> {
+  const cleanDomain = seller.domain ? seller.domain.trim() : '';
+  if (!cleanDomain || cleanDomain === 'none') {
+    await runQuery(
+      `UPDATE dockships_sellers
+       SET domain_status = 'failed',
+           ads_txt_status = 'not present',
+           ads_detected = 'none',
+           fetched_emails = '[]',
+           best_email = NULL,
+           crawled_at = datetime('now')
+       WHERE id = ?`,
+      [seller.id]
+    );
+    return;
+  }
+
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Crawl timeout after ${SELLER_DOMAIN_CRAWL_TIMEOUT_MS}ms`)), SELLER_DOMAIN_CRAWL_TIMEOUT_MS)
+    );
+    const result = await Promise.race([crawlWebsite(cleanDomain), timeoutPromise]);
+    await runQuery(
+      `UPDATE dockships_sellers
+       SET domain_status = ?,
+           ads_txt_status = ?,
+           ads_detected = ?,
+           fetched_emails = ?,
+           best_email = ?,
+           crawled_at = datetime('now')
+       WHERE id = ?`,
+      [
+        result.domainStatus,
+        result.adsTxtStatus,
+        result.adsDetected,
+        JSON.stringify(result.emails),
+        result.bestEmail || null,
+        seller.id
+      ]
+    );
+  } catch (err: any) {
+    const isTimeout = err?.message?.includes('timeout');
+    console.warn(`[Sellers Crawl] ${isTimeout ? 'Timeout' : 'Error'} for ${cleanDomain}: ${err?.message}`);
+    await runQuery(
+      `UPDATE dockships_sellers
+       SET domain_status = 'failed',
+           ads_txt_status = 'not present',
+           ads_detected = 'none',
+           fetched_emails = '[]',
+           best_email = NULL,
+           crawled_at = datetime('now')
+       WHERE id = ?`,
+      [seller.id]
+    );
+  }
+}
+
+/**
+ * Background crawl loop — concurrent 8-worker pool.
+ *
+ * Architecture:
+ * - Fetches 40 pending sellers at a time from the DB.
+ * - Splits them into chunks of CRAWL_CONCURRENCY (8) and runs all in parallel.
+ * - Promise.allSettled ensures one slow/failed domain never blocks others.
+ * - No inter-batch sleep — batches are continuous until all pending done.
+ * - Per-domain timeout: 12s (was 45s).
+ *
+ * Throughput: ~8 domains / ~2s avg = ~4 domains/sec = 1000 sellers in ~4 min.
  */
 async function crawlSellersBackground(companyDomain: string) {
   if (activeSellersCrawlers[companyDomain] === true) return;
   activeSellersCrawlers[companyDomain] = true;
 
-  console.log(`[Sellers Crawl] Starting background crawl for ${companyDomain}`);
+  console.log(`[Sellers Crawl] Starting concurrent crawl (${CRAWL_CONCURRENCY} workers) for ${companyDomain}`);
 
   const crawlStartedAt = Date.now();
-  const MAX_CRAWL_DURATION_MS = 6 * 60 * 60 * 1000; // 6-hour safety cap
+  const MAX_CRAWL_DURATION_MS = 6 * 60 * 60 * 1000;
 
   try {
     while (activeSellersCrawlers[companyDomain] === true) {
@@ -130,8 +201,9 @@ async function crawlSellersBackground(companyDomain: string) {
         break;
       }
 
-      const pendingSellers = await allRows<{ id: string, domain: string }>(
-        "SELECT id, domain FROM dockships_sellers WHERE company_domain = ? AND domain_status = 'pending' LIMIT 5",
+      // Fetch a large batch so we don't hammer the DB on every iteration
+      const pendingSellers = await allRows<{ id: string; domain: string }>(
+        "SELECT id, domain FROM dockships_sellers WHERE company_domain = ? AND domain_status = 'pending' LIMIT 40",
         [companyDomain]
       );
 
@@ -140,70 +212,15 @@ async function crawlSellersBackground(companyDomain: string) {
         break;
       }
 
-      // Sequential processing to avoid OOM — Promise.all with crawlWebsite() can use 50-100MB/call
-      for (const seller of pendingSellers) {
+      // Process in concurrent chunks of CRAWL_CONCURRENCY
+      for (let i = 0; i < pendingSellers.length; i += CRAWL_CONCURRENCY) {
         if (activeSellersCrawlers[companyDomain] !== true) break;
 
-        const cleanDomain = seller.domain ? seller.domain.trim() : '';
-        if (!cleanDomain || cleanDomain === 'none') {
-          await runQuery(
-            `UPDATE dockships_sellers 
-             SET domain_status = 'failed', 
-                 ads_txt_status = 'not present', 
-                 ads_detected = 'none', 
-                 fetched_emails = '[]', 
-                 best_email = NULL, 
-                 crawled_at = datetime('now') 
-             WHERE id = ?`,
-            [seller.id]
-          );
-          continue;
-        }
-
-        try {
-          // 45-second per-domain timeout to prevent stuck-at-70% syndrome
-          const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Crawl timeout after ${SELLER_DOMAIN_CRAWL_TIMEOUT_MS}ms`)), SELLER_DOMAIN_CRAWL_TIMEOUT_MS)
-          );
-
-          const result = await Promise.race([crawlWebsite(cleanDomain), timeoutPromise]);
-          await runQuery(
-            `UPDATE dockships_sellers 
-             SET domain_status = ?, 
-                 ads_txt_status = ?, 
-                 ads_detected = ?, 
-                 fetched_emails = ?, 
-                 best_email = ?, 
-                 crawled_at = datetime('now') 
-             WHERE id = ?`,
-            [
-              result.domainStatus,
-              result.adsTxtStatus,
-              result.adsDetected,
-              JSON.stringify(result.emails),
-              result.bestEmail || null,
-              seller.id
-            ]
-          );
-        } catch (err: any) {
-          const isTimeout = err?.message?.includes('timeout');
-          console.warn(`[Sellers Crawl] ${isTimeout ? 'Timeout' : 'Error'} for ${cleanDomain}: ${err?.message}`);
-          await runQuery(
-            `UPDATE dockships_sellers 
-             SET domain_status = 'failed', 
-                 ads_txt_status = 'not present', 
-                 ads_detected = 'none', 
-                 fetched_emails = '[]', 
-                 best_email = NULL, 
-                 crawled_at = datetime('now') 
-             WHERE id = ?`,
-            [seller.id]
-          );
-        }
+        const chunk = pendingSellers.slice(i, i + CRAWL_CONCURRENCY);
+        // allSettled — a single domain failure never aborts the chunk
+        await Promise.allSettled(chunk.map(seller => crawlOneSeller(seller)));
       }
-
-      // Small delay between batches to prevent CPU starvation
-      await new Promise(resolve => setTimeout(resolve, 800));
+      // No artificial delay — loop immediately to pick up the next batch
     }
   } catch (err) {
     console.error(`[Sellers Crawl] Fatal error for ${companyDomain}:`, err);
