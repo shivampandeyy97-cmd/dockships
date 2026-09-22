@@ -71,6 +71,12 @@ export async function initializeSchema(): Promise<void> {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(company_domain, domain)
     );
+
+    CREATE TABLE IF NOT EXISTS traffic_stats_cache (
+      domain TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `;
 
   return new Promise((resolve, reject) => {

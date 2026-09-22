@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { API_URL } from '../config';
+import { TrafficDashboard } from './TrafficDashboard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -155,6 +156,9 @@ const SellerRow = React.memo(({ s }: { s: Seller }) => {
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export const Dashboard: React.FC = () => {
+  // Navigation Tab State
+  const [activeTab, setActiveTab] = useState<'sellers' | 'traffic'>('sellers');
+
   // Company / fetch state
   const [companyInput, setCompanyInput] = useState('');
   const [fetchingSellers, setFetchingSellers] = useState(false);
@@ -642,46 +646,92 @@ export const Dashboard: React.FC = () => {
           <span style={S.logoText}>Dockships</span>
         </div>
 
-        {crawledCompanies.length > 0 && (
-          <>
-            <div style={S.sidebarLabel}>Crawled Companies</div>
-            {crawledCompanies.map(c => (
-              <button
-                key={c}
-                id={`company-btn-${c.replace(/\./g, '-')}`}
-                style={S.companyBtn(c === selectedCompany)}
-                onClick={() => {
-                  setSelectedCompany(c);
-                  setPage(1);
-                  setSearch('');
-                  setDomainFilter('all');
-                  setAdsTxtFilter('all');
-                  hasDataRef.current = false;
-                  fetchSellers(c, 1, '', 'all', 'all', false);
-                }}
-              >
-                {c}
-              </button>
-            ))}
-          </>
-        )}
+        {/* Feature Navigation Tabs */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={S.sidebarLabel}>Tools</div>
+          <button
+            id="tab-sellers-btn"
+            style={{
+              width: '100%', textAlign: 'left', padding: '10px 12px',
+              borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: '0.85rem',
+              marginBottom: 6, transition: 'all 0.15s ease', fontFamily: 'inherit',
+              background: activeTab === 'sellers' ? 'linear-gradient(135deg, rgba(0,212,177,0.2), rgba(8,145,178,0.2))' : 'transparent',
+              color: activeTab === 'sellers' ? '#00d4b1' : '#9ca3af',
+              fontWeight: activeTab === 'sellers' ? 700 : 500,
+              borderLeft: activeTab === 'sellers' ? '3px solid #00d4b1' : '3px solid transparent',
+              display: 'flex', alignItems: 'center', gap: 8
+            }}
+            onClick={() => setActiveTab('sellers')}
+          >
+            <span>⚓</span> sellers.json Crawler
+          </button>
 
-        {crawledCompanies.length === 0 && (
-          <p style={{ fontSize: '0.8rem', color: '#4b5563', paddingLeft: 8 }}>
-            No companies yet. Fetch a sellers.json to get started.
-          </p>
+          <button
+            id="tab-traffic-btn"
+            style={{
+              width: '100%', textAlign: 'left', padding: '10px 12px',
+              borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: '0.85rem',
+              marginBottom: 6, transition: 'all 0.15s ease', fontFamily: 'inherit',
+              background: activeTab === 'traffic' ? 'linear-gradient(135deg, rgba(0,212,177,0.2), rgba(8,145,178,0.2))' : 'transparent',
+              color: activeTab === 'traffic' ? '#00d4b1' : '#9ca3af',
+              fontWeight: activeTab === 'traffic' ? 700 : 500,
+              borderLeft: activeTab === 'traffic' ? '3px solid #00d4b1' : '3px solid transparent',
+              display: 'flex', alignItems: 'center', gap: 8
+            }}
+            onClick={() => setActiveTab('traffic')}
+          >
+            <span>📊</span> Traffic Intelligence
+          </button>
+        </div>
+
+        {activeTab === 'sellers' && (
+          <>
+            {crawledCompanies.length > 0 && (
+              <>
+                <div style={S.sidebarLabel}>Crawled Companies</div>
+                {crawledCompanies.map(c => (
+                  <button
+                    key={c}
+                    id={`company-btn-${c.replace(/\./g, '-')}`}
+                    style={S.companyBtn(c === selectedCompany)}
+                    onClick={() => {
+                      setSelectedCompany(c);
+                      setPage(1);
+                      setSearch('');
+                      setDomainFilter('all');
+                      setAdsTxtFilter('all');
+                      hasDataRef.current = false;
+                      fetchSellers(c, 1, '', 'all', 'all', false);
+                    }}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {crawledCompanies.length === 0 && (
+              <p style={{ fontSize: '0.8rem', color: '#4b5563', paddingLeft: 8 }}>
+                No companies yet. Fetch a sellers.json to get started.
+              </p>
+            )}
+          </>
         )}
 
         <div style={{ marginTop: 'auto', paddingTop: 24 }}>
           <p style={{ fontSize: '0.72rem', color: '#374151', textAlign: 'center' }}>
-            sellers.json crawler
+            Dockships v2.0
           </p>
         </div>
       </aside>
 
       {/* Main */}
       <main style={S.main}>
-        {/* Fetch Bar */}
+        {activeTab === 'traffic' ? (
+          <TrafficDashboard />
+        ) : (
+          <>
+            {/* Fetch Bar */}
         <form onSubmit={handleFetch} style={S.fetchBar}>
           <input
             id="domain-input"
@@ -834,6 +884,8 @@ export const Dashboard: React.FC = () => {
               Enter any ad tech company domain above to fetch their <code style={{ background: 'rgba(0,212,177,0.1)', padding: '1px 6px', borderRadius: 4, color: '#00d4b1' }}>sellers.json</code> file and crawl all their listed seller domains.
             </p>
           </div>
+        )}
+          </>
         )}
       </main>
     </div>

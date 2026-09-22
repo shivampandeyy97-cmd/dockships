@@ -508,6 +508,30 @@ app.get('/api/sellers/companies', async (_req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  WEBSITE TRAFFIC INTELLIGENCE — /api/traffic
+// ─────────────────────────────────────────────────────────────────────────────
+import { getTrafficStats } from './services/traffic/trafficService';
+
+app.get('/api/traffic', async (req, res) => {
+  const domain = req.query.domain as string;
+  const refresh = req.query.refresh === 'true';
+
+  if (!domain) {
+    return res.status(400).json({ error: 'Query parameter "domain" is required.' });
+  }
+
+  try {
+    const stats = await getTrafficStats(domain, refresh);
+    return res.json(stats);
+  } catch (err: any) {
+    console.error(`Error in /api/traffic for domain "${domain}":`, err);
+    return res.status(500).json({
+      error: err.message || 'Failed to analyze traffic for domain.'
+    });
+  }
+});
+
 // ─── Static Frontend Serving ──────────────────────────────────────────────────
 const possibleFrontendPaths = [
   path.resolve(__dirname, '../../../apps/frontend/dist'),
