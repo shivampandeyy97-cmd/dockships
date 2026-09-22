@@ -106,6 +106,52 @@ function AdsTxtBadge({ status }: { status?: string }) {
   );
 }
 
+// Stable row component — only re-renders if its own seller data changes
+const SellerRow = React.memo(({ s }: { s: Seller }) => {
+  const S = {
+    td: {
+      padding: '11px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)',
+      color: '#d1faf4', verticalAlign: 'middle' as const
+    }
+  };
+  return (
+    <tr
+      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,212,177,0.04)')}
+      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+    >
+      <td style={S.td}>
+        <a
+          href={`https://${s.domain}`} target="_blank" rel="noopener noreferrer"
+          style={{ color: '#00d4b1', textDecoration: 'none', fontWeight: 600 }}
+        >
+          {s.domain}
+        </a>
+      </td>
+      <td style={{ ...S.td, color: '#9ca3af' }}>{s.name || <span style={{ color: '#374151' }}>—</span>}</td>
+      <td style={{ ...S.td, color: '#6b7280', fontFamily: 'monospace', fontSize: '0.78rem' }}>{s.seller_id || '—'}</td>
+      <td style={S.td}>
+        {s.seller_type ? (
+          <span style={{
+            padding: '2px 8px', borderRadius: 6, fontSize: '0.72rem', fontWeight: 600,
+            background: s.seller_type.toLowerCase() === 'publisher' ? 'rgba(139,92,246,0.12)' : 'rgba(14,165,233,0.12)',
+            color: s.seller_type.toLowerCase() === 'publisher' ? '#a78bfa' : '#38bdf8'
+          }}>
+            {s.seller_type}
+          </span>
+        ) : '—'}
+      </td>
+      <td style={S.td}><StatusBadge status={s.domain_status} /></td>
+      <td style={S.td}><AdsTxtBadge status={s.ads_txt_status} /></td>
+      <td style={{ ...S.td, fontSize: '0.8rem', color: '#9ca3af' }}>
+        {s.best_email || (safeParseEmails(s.fetched_emails)[0]) || <span style={{ color: '#374151' }}>—</span>}
+      </td>
+      <td style={{ ...S.td, fontSize: '0.75rem', color: '#4b5563' }}>
+        {s.crawled_at ? new Date(s.crawled_at).toLocaleDateString() : <span style={{ color: '#374151' }}>—</span>}
+      </td>
+    </tr>
+  );
+}, (prev, next) => JSON.stringify(prev.s) === JSON.stringify(next.s));
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export const Dashboard: React.FC = () => {
@@ -120,7 +166,8 @@ export const Dashboard: React.FC = () => {
 
   // Sellers data
   const [sellers, setSellers] = useState<Seller[]>([]);
-  const [loadingSellers, setLoadingSellers] = useState(false);
+  // initialLoading: only true on the very first fetch for a company (no data yet)
+  const [initialLoading, setInitialLoading] = useState(false);
   const [stats, setStats] = useState<SellersStats>({
     total: 0, pending: 0, live: 0, failed: 0,
     adsTxtPresent: 0, adsTxtNotPresent: 0, crawling: false
@@ -136,13 +183,15 @@ export const Dashboard: React.FC = () => {
   // Export loading
   const [exporting, setExporting] = useState(false);
 
-  // Track whether a fetch is a silent background poll (no loading spinner)
-  const isPollingRef = useRef(false);
-  // Track the crawling state in a ref so the polling interval doesn't need
-  // to be restarted every time stats.crawling flips
+  // Refs — used by polling interval so it never needs to restart
   const crawlingRef = useRef(false);
   const selectedCompanyRef = useRef('');
   const pageRef = useRef(1);
+  const searchRef = useRef('');
+  const domainFilterRef = useRef('all');
+  const adsTxtFilterRef = useRef('all');
+  // Track how many sellers we currently have — if 0, show initial loader
+  const hasDataRef = useRef(false);
 
   // ─── Data fetching ──────────────────────────────────────────────────────────
 
@@ -158,13 +207,25 @@ export const Dashboard: React.FC = () => {
     }
   }, []);
 
+  /**
+   * Core data fetcher.
+   * silent=true → background poll, NEVER touches loading state, NEVER unmounts table.
+   * silent=false → user-triggered, shows initial loader only if no data yet.
+   */
   const fetchSellers = useCallback(async (
-    company: string, pageNum: number,
-    searchVal = search, domFilt = domainFilter, adsFilt = adsTxtFilter,
-    silent = false  // true = background poll, no loading spinner
+    company: string,
+    pageNum: number,
+    searchVal: string,
+    domFilt: string,
+    adsFilt: string,
+    silent: boolean
   ) => {
     if (!company) return;
-    if (!silent) setLoadingSellers(true);
+
+    // Only show the loading spinner on the very first load (no rows yet)
+    const showLoader = !silent && !hasDataRef.current;
+    if (showLoader) setInitialLoading(true);
+
     try {
       const params = new URLSearchParams({
         companyDomain: company,
@@ -177,66 +238,88 @@ export const Dashboard: React.FC = () => {
       const res = await fetch(`${API_URL}/api/sellers?${params}`);
       if (res.ok) {
         const data = await res.json();
-        // Always update stats (number counters) — these are lightweight
+
+        // Stats always update (tiny update, just numbers — no DOM change)
         setStats(data.stats);
         crawlingRef.current = data.stats.crawling;
-        // Only replace the sellers array if it actually changed
-        // (avoids React re-rendering every row on every poll tick)
-        setSellers(prev => {
-          const newJson = JSON.stringify(data.sellers);
-          const prevJson = JSON.stringify(prev);
-          return newJson === prevJson ? prev : data.sellers;
+
+        // Sellers — only replace array reference if content actually changed
+        // This prevents React from re-rendering every single <SellerRow>
+        setSellers((prev: Seller[]) => {
+          if (prev.length === data.sellers.length) {
+            // Quick check: compare just IDs and domain_status (what visually changes during crawl)
+            const changed = data.sellers.some((s: Seller, i: number) =>
+              !prev[i] ||
+              prev[i].id !== s.id ||
+              prev[i].domain_status !== s.domain_status ||
+              prev[i].best_email !== s.best_email ||
+              prev[i].ads_txt_status !== s.ads_txt_status
+            );
+            if (!changed) return prev; // exact same — skip re-render
+          }
+          hasDataRef.current = data.sellers.length > 0;
+          return data.sellers;
         });
         setPagination(data.pagination);
+        hasDataRef.current = data.sellers.length > 0;
       }
     } catch (e) {
       console.error('Error loading sellers:', e);
     } finally {
-      if (!silent) setLoadingSellers(false);
+      if (showLoader) setInitialLoading(false);
     }
-  }, [search, domainFilter, adsTxtFilter]);
+  }, []); // NO dependencies — reads everything from refs or params
+
+  // ─── Keep refs in sync with state ──────────────────────────────────────────
+  useEffect(() => { selectedCompanyRef.current = selectedCompany; }, [selectedCompany]);
+  useEffect(() => { pageRef.current = page; }, [page]);
+  useEffect(() => { crawlingRef.current = stats.crawling; }, [stats.crawling]);
+  useEffect(() => { searchRef.current = search; }, [search]);
+  useEffect(() => { domainFilterRef.current = domainFilter; }, [domainFilter]);
+  useEffect(() => { adsTxtFilterRef.current = adsTxtFilter; }, [adsTxtFilter]);
+
+  // ─── Effects ────────────────────────────────────────────────────────────────
 
   // Initial load
   useEffect(() => { fetchCompanies(); }, [fetchCompanies]);
 
-  // Auto-select first company
+  // Auto-select first company on initial load
   useEffect(() => {
     if (crawledCompanies.length > 0 && !selectedCompany) {
       const first = crawledCompanies[0];
       setSelectedCompany(first);
       selectedCompanyRef.current = first;
-      fetchSellers(first, 1, '', 'all', 'all');
+      hasDataRef.current = false;
+      fetchSellers(first, 1, '', 'all', 'all', false);
     }
-  }, [crawledCompanies]);
+  }, [crawledCompanies, fetchSellers]);
 
-  // Keep refs in sync with state for use inside the polling interval
+  // Re-fetch when company / page / filters change (user-triggered, non-silent)
   useEffect(() => {
-    selectedCompanyRef.current = selectedCompany;
-  }, [selectedCompany]);
-  useEffect(() => {
-    pageRef.current = page;
-  }, [page]);
-  useEffect(() => {
-    crawlingRef.current = stats.crawling;
-  }, [stats.crawling]);
+    if (!selectedCompany) return;
+    // When switching company, reset hasDataRef so loader shows
+    hasDataRef.current = sellers.length > 0 && selectedCompanyRef.current === selectedCompany;
+    fetchSellers(selectedCompany, page, search, domainFilter, adsTxtFilter, false);
+  }, [selectedCompany, page, domainFilter, adsTxtFilter, fetchSellers]);
+  // NOTE: `search` intentionally omitted — search is submit-triggered via handleSearchSubmit
 
-  // Single long-lived polling interval — never restarts.
-  // Reads current values via refs so no dependency churn.
+  // Single persistent polling interval — NEVER restarts during crawl
+  // Uses refs so it always has fresh values without causing effect re-runs
   useEffect(() => {
     const id = setInterval(() => {
       if (crawlingRef.current && selectedCompanyRef.current) {
-        // Silent poll: no loading spinner, no table blink
-        fetchSellers(selectedCompanyRef.current, pageRef.current,
-          undefined, undefined, undefined, true);
+        fetchSellers(
+          selectedCompanyRef.current,
+          pageRef.current,
+          searchRef.current,
+          domainFilterRef.current,
+          adsTxtFilterRef.current,
+          true // silent — no loading state, no spinner, no table blink
+        );
       }
     }, 3000);
     return () => clearInterval(id);
-  }, [fetchSellers]); // only re-creates if fetchSellers itself changes (filter change)
-
-  // Re-fetch on filter / page changes (non-silent, shows loader)
-  useEffect(() => {
-    if (selectedCompany) fetchSellers(selectedCompany, page);
-  }, [selectedCompany, page, domainFilter, adsTxtFilter]);
+  }, [fetchSellers]); // fetchSellers has no deps itself, so this runs once
 
   // ─── Actions ────────────────────────────────────────────────────────────────
 
@@ -260,8 +343,9 @@ export const Dashboard: React.FC = () => {
       setSearch('');
       setDomainFilter('all');
       setAdsTxtFilter('all');
+      hasDataRef.current = false;
       await fetchCompanies();
-      fetchSellers(data.companyDomain, 1, '', 'all', 'all');
+      fetchSellers(data.companyDomain, 1, '', 'all', 'all', false);
     } catch (err: any) {
       setFetchError(err.message || 'Error fetching sellers.json');
     } finally {
@@ -278,7 +362,7 @@ export const Dashboard: React.FC = () => {
     });
     crawlingRef.current = true;
     setStats(prev => ({ ...prev, crawling: true }));
-    fetchSellers(selectedCompany, page);
+    fetchSellers(selectedCompany, page, search, domainFilter, adsTxtFilter, false);
   };
 
   const handleStopCrawl = async () => {
@@ -302,6 +386,7 @@ export const Dashboard: React.FC = () => {
     });
     setSelectedCompany('');
     setSellers([]);
+    hasDataRef.current = false;
     setStats({ total: 0, pending: 0, live: 0, failed: 0, adsTxtPresent: 0, adsTxtNotPresent: 0, crawling: false });
     setPagination({ total: 0, page: 1, limit: 50, pages: 1 });
     fetchCompanies();
@@ -310,7 +395,7 @@ export const Dashboard: React.FC = () => {
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(1);
-    fetchSellers(selectedCompany, 1, search, domainFilter, adsTxtFilter);
+    fetchSellers(selectedCompany, 1, search, domainFilter, adsTxtFilter, false);
   };
 
   const handleExportCSV = async () => {
@@ -491,11 +576,6 @@ export const Dashboard: React.FC = () => {
       textAlign: 'left' as const, whiteSpace: 'nowrap' as const
     },
 
-    td: {
-      padding: '11px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)',
-      color: '#d1faf4', verticalAlign: 'middle' as const
-    },
-
     crawlingPill: {
       display: 'inline-flex', alignItems: 'center', gap: 6,
       padding: '4px 12px', borderRadius: '9999px',
@@ -576,7 +656,8 @@ export const Dashboard: React.FC = () => {
                   setSearch('');
                   setDomainFilter('all');
                   setAdsTxtFilter('all');
-                  fetchSellers(c, 1, '', 'all', 'all');
+                  hasDataRef.current = false;
+                  fetchSellers(c, 1, '', 'all', 'all', false);
                 }}
               >
                 {c}
@@ -706,9 +787,9 @@ export const Dashboard: React.FC = () => {
               </button>
             </form>
 
-            {/* Table */}
+            {/* Table — NEVER unmounts during polling */}
             <div style={S.tableWrapper}>
-              {loadingSellers && sellers.length === 0 ? (
+              {initialLoading ? (
                 <div style={S.emptyState}>
                   <div style={{ ...S.dot, margin: '0 auto 12px', width: 12, height: 12 }} />
                   <p style={{ color: '#6b7280', fontSize: '0.9rem' }}>Loading sellers…</p>
@@ -733,39 +814,7 @@ export const Dashboard: React.FC = () => {
                     </thead>
                     <tbody>
                       {sellers.map(s => (
-                        <tr key={s.id} style={{ transition: 'background 0.1s' }}
-                          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,212,177,0.04)')}
-                          onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                          <td style={S.td}>
-                            <a
-                              href={`https://${s.domain}`} target="_blank" rel="noopener noreferrer"
-                              style={{ color: '#00d4b1', textDecoration: 'none', fontWeight: 600 }}
-                            >
-                              {s.domain}
-                            </a>
-                          </td>
-                          <td style={{ ...S.td, color: '#9ca3af' }}>{s.name || <span style={{ color: '#374151' }}>—</span>}</td>
-                          <td style={{ ...S.td, color: '#6b7280', fontFamily: 'monospace', fontSize: '0.78rem' }}>{s.seller_id || '—'}</td>
-                          <td style={S.td}>
-                            {s.seller_type ? (
-                              <span style={{
-                                padding: '2px 8px', borderRadius: 6, fontSize: '0.72rem', fontWeight: 600,
-                                background: s.seller_type.toLowerCase() === 'publisher' ? 'rgba(139,92,246,0.12)' : 'rgba(14,165,233,0.12)',
-                                color: s.seller_type.toLowerCase() === 'publisher' ? '#a78bfa' : '#38bdf8'
-                              }}>
-                                {s.seller_type}
-                              </span>
-                            ) : '—'}
-                          </td>
-                          <td style={S.td}><StatusBadge status={s.domain_status} /></td>
-                          <td style={S.td}><AdsTxtBadge status={s.ads_txt_status} /></td>
-                          <td style={{ ...S.td, fontSize: '0.8rem', color: '#9ca3af' }}>
-                            {s.best_email || (safeParseEmails(s.fetched_emails)[0]) || <span style={{ color: '#374151' }}>—</span>}
-                          </td>
-                          <td style={{ ...S.td, fontSize: '0.75rem', color: '#4b5563' }}>
-                            {s.crawled_at ? new Date(s.crawled_at).toLocaleDateString() : <span style={{ color: '#374151' }}>—</span>}
-                          </td>
-                        </tr>
+                        <SellerRow key={s.id} s={s} />
                       ))}
                     </tbody>
                   </table>
