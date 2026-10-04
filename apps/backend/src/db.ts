@@ -108,6 +108,8 @@ async function runMigrations() {
 
     // Ensure UNIQUE index on (company_domain, domain)
     await runQuery('CREATE UNIQUE INDEX IF NOT EXISTS idx_sellers_company_domain ON dockships_sellers(company_domain, domain);');
+    // Speeds up pending-row claims, stats aggregation and status filters
+    await runQuery('CREATE INDEX IF NOT EXISTS idx_sellers_company_status ON dockships_sellers(company_domain, domain_status);');
   } catch (err) {
     console.error('⚠️ Migration warning:', err);
   }

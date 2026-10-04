@@ -13,9 +13,6 @@ interface Seller {
   domain: string;
   is_deleted?: number;
   domain_status?: string;
-  ads_txt_status?: string;
-  ads_detected?: string;
-  fetched_emails?: string;
   best_email?: string;
   crawled_at?: string;
   created_at: string;
@@ -26,8 +23,7 @@ interface SellersStats {
   pending: number;
   live: number;
   failed: number;
-  adsTxtPresent: number;
-  adsTxtNotPresent: number;
+  emailsFound: number;
   crawling: boolean;
 }
 
@@ -40,19 +36,37 @@ interface Pagination {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function safeParseEmails(emailsInput: any): string[] {
-  if (!emailsInput) return [];
-  if (Array.isArray(emailsInput)) return emailsInput;
-  if (typeof emailsInput === 'string') {
-    try {
-      const parsed = JSON.parse(emailsInput);
-      if (Array.isArray(parsed)) return parsed;
-      return emailsInput.trim() ? [emailsInput.trim()] : [];
-    } catch {
-      return emailsInput.trim() ? [emailsInput.trim()] : [];
-    }
+const csvCacheKey = (company: string) => `dockships_csv_${company}`;
+
+function saveCsvCache(company: string, csv: string) {
+  try {
+    localStorage.setItem(csvCacheKey(company), csv);
+  } catch { /* storage full / unavailable — cache is best-effort */ }
+}
+
+function readCsvCache(company: string): string | null {
+  try {
+    return localStorage.getItem(csvCacheKey(company));
+  } catch {
+    return null;
   }
-  return [];
+}
+
+function downloadCsv(csv: string, filename: string) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/** A CSV is only valid if it has at least one data row below the header. */
+function csvHasData(csv: string): boolean {
+  return csv.split(/\r?\n/).filter(l => l.trim().length > 0).length > 1;
 }
 
 function StatusBadge({ status }: { status?: string }) {
@@ -92,21 +106,6 @@ function StatusBadge({ status }: { status?: string }) {
   );
 }
 
-function AdsTxtBadge({ status }: { status?: string }) {
-  const isPresent = status === 'present';
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center',
-      padding: '2px 8px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 600,
-      background: isPresent ? 'rgba(0,212,177,0.1)' : 'rgba(156,163,175,0.1)',
-      color: isPresent ? '#00d4b1' : '#6b7280',
-      border: `1px solid ${isPresent ? 'rgba(0,212,177,0.25)' : 'rgba(156,163,175,0.2)'}`
-    }}>
-      {isPresent ? '✓ ads.txt' : '— ads.txt'}
-    </span>
-  );
-}
-
 // Stable row component — only re-renders if its own seller data changes
 const SellerRow = React.memo(({ s }: { s: Seller }) => {
   const S = {
@@ -142,9 +141,8 @@ const SellerRow = React.memo(({ s }: { s: Seller }) => {
         ) : '—'}
       </td>
       <td style={S.td}><StatusBadge status={s.domain_status} /></td>
-      <td style={S.td}><AdsTxtBadge status={s.ads_txt_status} /></td>
       <td style={{ ...S.td, fontSize: '0.8rem', color: '#9ca3af' }}>
-        {s.best_email || (safeParseEmails(s.fetched_emails)[0]) || <span style={{ color: '#374151' }}>—</span>}
+        {s.best_email || <span style={{ color: '#374151' }}>—</span>}
       </td>
       <td style={{ ...S.td, fontSize: '0.75rem', color: '#4b5563' }}>
         {s.crawled_at ? new Date(s.crawled_at).toLocaleDateString() : <span style={{ color: '#374151' }}>—</span>}
@@ -174,14 +172,14 @@ export const Dashboard: React.FC = () => {
   const [initialLoading, setInitialLoading] = useState(false);
   const [stats, setStats] = useState<SellersStats>({
     total: 0, pending: 0, live: 0, failed: 0,
-    adsTxtPresent: 0, adsTxtNotPresent: 0, crawling: false
+    emailsFound: 0, crawling: false
   });
   const [pagination, setPagination] = useState<Pagination>({ total: 0, page: 1, limit: 50, pages: 1 });
 
   // Filters
   const [search, setSearch] = useState('');
   const [domainFilter, setDomainFilter] = useState('all');
-  const [adsTxtFilter, setAdsTxtFilter] = useState('all');
+  const [emailFilter, setEmailFilter] = useState('all');
   const [page, setPage] = useState(1);
 
   // Export loading
@@ -193,7 +191,7 @@ export const Dashboard: React.FC = () => {
   const pageRef = useRef(1);
   const searchRef = useRef('');
   const domainFilterRef = useRef('all');
-  const adsTxtFilterRef = useRef('all');
+  const emailFilterRef = useRef('all');
   // Track how many sellers we currently have — if 0, show initial loader
   const hasDataRef = useRef(false);
 
@@ -221,7 +219,7 @@ export const Dashboard: React.FC = () => {
     pageNum: number,
     searchVal: string,
     domFilt: string,
-    adsFilt: string,
+    emailFilt: string,
     silent: boolean
   ) => {
     if (!company) return;
@@ -237,7 +235,7 @@ export const Dashboard: React.FC = () => {
         limit: '50',
         search: searchVal,
         domainStatus: domFilt,
-        adsTxtStatus: adsFilt
+        emailFilter: emailFilt
       });
       const res = await fetch(`${API_URL}/api/sellers?${params}`);
       if (res.ok) {
@@ -256,8 +254,7 @@ export const Dashboard: React.FC = () => {
               !prev[i] ||
               prev[i].id !== s.id ||
               prev[i].domain_status !== s.domain_status ||
-              prev[i].best_email !== s.best_email ||
-              prev[i].ads_txt_status !== s.ads_txt_status
+              prev[i].best_email !== s.best_email
             );
             if (!changed) return prev; // exact same — skip re-render
           }
@@ -280,7 +277,7 @@ export const Dashboard: React.FC = () => {
   useEffect(() => { crawlingRef.current = stats.crawling; }, [stats.crawling]);
   useEffect(() => { searchRef.current = search; }, [search]);
   useEffect(() => { domainFilterRef.current = domainFilter; }, [domainFilter]);
-  useEffect(() => { adsTxtFilterRef.current = adsTxtFilter; }, [adsTxtFilter]);
+  useEffect(() => { emailFilterRef.current = emailFilter; }, [emailFilter]);
 
   // ─── Effects ────────────────────────────────────────────────────────────────
 
@@ -303,8 +300,8 @@ export const Dashboard: React.FC = () => {
     if (!selectedCompany) return;
     // When switching company, reset hasDataRef so loader shows
     hasDataRef.current = sellers.length > 0 && selectedCompanyRef.current === selectedCompany;
-    fetchSellers(selectedCompany, page, search, domainFilter, adsTxtFilter, false);
-  }, [selectedCompany, page, domainFilter, adsTxtFilter, fetchSellers]);
+    fetchSellers(selectedCompany, page, search, domainFilter, emailFilter, false);
+  }, [selectedCompany, page, domainFilter, emailFilter, fetchSellers]);
   // NOTE: `search` intentionally omitted — search is submit-triggered via handleSearchSubmit
 
   // Single persistent polling interval — NEVER restarts during crawl
@@ -317,7 +314,7 @@ export const Dashboard: React.FC = () => {
           pageRef.current,
           searchRef.current,
           domainFilterRef.current,
-          adsTxtFilterRef.current,
+          emailFilterRef.current,
           true // silent — no loading state, no spinner, no table blink
         );
       }
@@ -346,7 +343,7 @@ export const Dashboard: React.FC = () => {
       setPage(1);
       setSearch('');
       setDomainFilter('all');
-      setAdsTxtFilter('all');
+      setEmailFilter('all');
       hasDataRef.current = false;
       await fetchCompanies();
       fetchSellers(data.companyDomain, 1, '', 'all', 'all', false);
@@ -366,7 +363,7 @@ export const Dashboard: React.FC = () => {
     });
     crawlingRef.current = true;
     setStats(prev => ({ ...prev, crawling: true }));
-    fetchSellers(selectedCompany, page, search, domainFilter, adsTxtFilter, false);
+    fetchSellers(selectedCompany, page, search, domainFilter, emailFilter, false);
   };
 
   const handleStopCrawl = async () => {
@@ -391,7 +388,7 @@ export const Dashboard: React.FC = () => {
     setSelectedCompany('');
     setSellers([]);
     hasDataRef.current = false;
-    setStats({ total: 0, pending: 0, live: 0, failed: 0, adsTxtPresent: 0, adsTxtNotPresent: 0, crawling: false });
+    setStats({ total: 0, pending: 0, live: 0, failed: 0, emailsFound: 0, crawling: false });
     setPagination({ total: 0, page: 1, limit: 50, pages: 1 });
     fetchCompanies();
   };
@@ -399,45 +396,67 @@ export const Dashboard: React.FC = () => {
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setPage(1);
-    fetchSellers(selectedCompany, 1, search, domainFilter, adsTxtFilter, false);
+    fetchSellers(selectedCompany, 1, search, domainFilter, emailFilter, false);
+  };
+
+  const exportUrl = (company: string, withFilters: boolean) => {
+    const params = new URLSearchParams({ companyDomain: company });
+    if (withFilters) {
+      params.set('search', search);
+      params.set('domainStatus', domainFilter);
+      params.set('emailFilter', emailFilter);
+    }
+    return `${API_URL}/api/sellers/export?${params}`;
+  };
+
+  /** Fetch the full CSV from the server. Returns null if the server has nothing/fails. */
+  const fetchServerCsv = async (company: string, withFilters: boolean): Promise<string | null> => {
+    try {
+      const res = await fetch(exportUrl(company, withFilters));
+      if (!res.ok) return null;
+      const text = await res.text();
+      return csvHasData(text) ? text : null;
+    } catch {
+      return null;
+    }
   };
 
   const handleExportCSV = async () => {
     if (!selectedCompany) return;
     setExporting(true);
     try {
-      const params = new URLSearchParams({
-        companyDomain: selectedCompany, page: '1', limit: '100000',
-        search, domainStatus: domainFilter, adsTxtStatus: adsTxtFilter
-      });
-      const res = await fetch(`${API_URL}/api/sellers?${params}`);
-      const data = await res.json();
-      const list: Seller[] = data?.sellers || [];
+      const filtersActive = !!search || domainFilter !== 'all' || emailFilter !== 'all';
+      const filename = `${selectedCompany}_sellers_${new Date().toISOString().split('T')[0]}.csv`;
 
-      const headers = ['Seller ID', 'Legal Name', 'Seller Type', 'Business Domain', 'Is Live', 'ads.txt Status', 'Best Email', 'All Emails', 'Crawled At'];
-      const rows = list.map(s => [
-        s.seller_id || '', s.name || '', s.seller_type || '', s.domain || '',
-        s.domain_status || 'pending', s.ads_txt_status || 'pending',
-        s.best_email || '', safeParseEmails(s.fetched_emails).join('; '), s.crawled_at || ''
-      ]);
+      let csv = await fetchServerCsv(selectedCompany, filtersActive);
+      if (csv) {
+        if (!filtersActive) saveCsvCache(selectedCompany, csv);
+      } else {
+        // Server has no data (e.g. restarted after the crawl) — use the copy saved when the crawl finished
+        csv = readCsvCache(selectedCompany);
+        if (!csv || !csvHasData(csv)) csv = null;
+      }
 
-      const csvContent = [
-        headers.join(','),
-        ...rows.map(row => row.map(val => `"${String(val ?? '').replace(/"/g, '""')}"`).join(','))
-      ].join('\n');
-
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${selectedCompany}_sellers_${new Date().toISOString().split('T')[0]}.csv`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      if (!csv) {
+        window.alert('No crawl data is available to export. The server may have restarted and cleared the results — please run the crawl again.');
+        return;
+      }
+      downloadCsv(csv, filename);
     } finally {
       setExporting(false);
     }
   };
+
+  // When a crawl finishes, immediately snapshot the full CSV in the browser so it can still be
+  // downloaded later even if the server loses its data.
+  const wasCrawlingRef = useRef(false);
+  useEffect(() => {
+    if (wasCrawlingRef.current && !stats.crawling && selectedCompany && stats.total > 0) {
+      fetchServerCsv(selectedCompany, false).then(csv => { if (csv) saveCsvCache(selectedCompany, csv); });
+    }
+    wasCrawlingRef.current = stats.crawling;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats.crawling]);
 
   // ─── Styles ─────────────────────────────────────────────────────────────────
 
@@ -699,7 +718,7 @@ export const Dashboard: React.FC = () => {
                       setPage(1);
                       setSearch('');
                       setDomainFilter('all');
-                      setAdsTxtFilter('all');
+                      setEmailFilter('all');
                       hasDataRef.current = false;
                       fetchSellers(c, 1, '', 'all', 'all', false);
                     }}
@@ -792,8 +811,7 @@ export const Dashboard: React.FC = () => {
                 { label: 'Live Domains', value: stats.live.toLocaleString(), color: '#00d4b1' },
                 { label: 'Failed', value: stats.failed.toLocaleString(), color: '#f87171' },
                 { label: 'Pending', value: stats.pending.toLocaleString(), color: '#fbbf24' },
-                { label: 'ads.txt Present', value: stats.adsTxtPresent.toLocaleString(), color: '#00d4b1' },
-                { label: 'ads.txt Missing', value: stats.adsTxtNotPresent.toLocaleString(), color: '#6b7280' },
+                { label: 'Emails Found', value: stats.emailsFound.toLocaleString(), color: '#38bdf8' },
               ].map(s => (
                 <div key={s.label} style={S.statCard}>
                   <div style={{ ...S.statValue, color: s.color }}>{s.value}</div>
@@ -823,14 +841,14 @@ export const Dashboard: React.FC = () => {
                 <option value="pending">Pending</option>
               </select>
               <select
-                id="ads-txt-filter"
+                id="email-filter"
                 style={S.filterSelect}
-                value={adsTxtFilter}
-                onChange={e => { setAdsTxtFilter(e.target.value); setPage(1); }}
+                value={emailFilter}
+                onChange={e => { setEmailFilter(e.target.value); setPage(1); }}
               >
-                <option value="all">All ads.txt</option>
-                <option value="present">Present</option>
-                <option value="not present">Missing</option>
+                <option value="all">All Emails</option>
+                <option value="found">Email Found</option>
+                <option value="missing">No Email</option>
               </select>
               <button type="submit" style={{ ...S.btnTeal, padding: '7px 16px', fontSize: '0.85rem', boxShadow: 'none' }}>
                 Search
@@ -857,7 +875,7 @@ export const Dashboard: React.FC = () => {
                   <table style={S.table}>
                     <thead>
                       <tr>
-                        {['Business Domain', 'Legal Name', 'Seller ID', 'Type', 'Domain Status', 'ads.txt', 'Best Email', 'Crawled'].map(h => (
+                        {['Business Domain', 'Legal Name', 'Seller ID', 'Type', 'Domain Status', 'Best Email', 'Crawled'].map(h => (
                           <th key={h} style={S.th}>{h}</th>
                         ))}
                       </tr>

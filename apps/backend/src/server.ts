@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import axios from 'axios';
 import { initializeSchema, runQuery, getRow, allRows } from './db';
-import { crawlWebsite, checkAdsTxt } from './services/crawler';
+import { crawlWebsite } from './services/crawler';
 import { saveSellersSnapshot, restoreSellersSnapshot } from './services/snapshot';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -43,7 +43,10 @@ app.use('/api', (_req, res, next) => {
 
 // Initialize DB schema on startup
 initializeSchema()
-  .then(() => console.log('Database schema initialized.'))
+  .then(() => {
+    console.log('Database schema initialized.');
+    resumeInterruptedCrawls();
+  })
   .catch((err) => console.error('Failed to initialize database schema:', err));
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
@@ -67,175 +70,108 @@ app.get('/api/db-status', async (_req, res) => {
 
 const activeSellersCrawlers: Record<string, boolean> = {};
 
-// Per-domain crawl timeout — tight enough to keep throughput high
-const SELLER_DOMAIN_CRAWL_TIMEOUT_MS = 12000; // 12s (was 45s)
+// Hard cap per domain (DNS + fetch + contact pages + MX) so one slow site never stalls a worker
+const SELLER_DOMAIN_CRAWL_TIMEOUT_MS = 16000;
 
-// How many sellers to process concurrently per company crawl
-const CRAWL_CONCURRENCY = 8;
+// Worker pool size. Crawling is network-bound, so many in-flight requests are cheap.
+const CRAWL_CONCURRENCY = Number(process.env.CRAWL_CONCURRENCY) || 40;
 
-/**
- * Helper: check if a seller domain is live + has ads.txt.
- * Used for quick single-domain re-checks if needed.
- */
-async function checkSellerDomain(domain: string): Promise<{ domainStatus: 'pass' | 'failed', adsTxtStatus: 'present' | 'not present' }> {
-  const cleanDomain = domain.trim().toLowerCase();
-  let formattedUrl = cleanDomain;
-  if (!/^https?:\/\//i.test(formattedUrl)) {
-    formattedUrl = 'https://' + formattedUrl;
-  }
+// Rows claimed from the DB per refill
+const CRAWL_BATCH_SIZE = 400;
 
-  let domainStatus: 'pass' | 'failed' = 'failed';
-  let adsTxtStatus: 'present' | 'not present' = 'not present';
+type CrawlOutcome = { domainStatus: 'pass' | 'failed'; bestEmail: string | null };
 
-  const userAgentString = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-  try {
-    const response = await axios.get(formattedUrl, {
-      headers: { 'User-Agent': userAgentString },
-      timeout: 5000,
-      validateStatus: (status) => status >= 200 && status < 400,
-      maxRedirects: 3
-    });
-    domainStatus = 'pass';
-    const resolvedUrl = response.request?.res?.responseUrl || formattedUrl;
-    adsTxtStatus = await checkAdsTxt(resolvedUrl);
-  } catch {
-    if (formattedUrl.startsWith('https://')) {
-      const httpUrl = formattedUrl.replace('https://', 'http://');
-      try {
-        const response = await axios.get(httpUrl, {
-          headers: { 'User-Agent': userAgentString },
-          timeout: 5000,
-          validateStatus: (status) => status >= 200 && status < 400,
-          maxRedirects: 3
-        });
-        domainStatus = 'pass';
-        const resolvedUrl = response.request?.res?.responseUrl || httpUrl;
-        adsTxtStatus = await checkAdsTxt(resolvedUrl);
-      } catch {
-        domainStatus = 'failed';
-      }
-    }
-  }
-
-  return { domainStatus, adsTxtStatus };
+async function saveOutcome(id: string, outcome: CrawlOutcome): Promise<void> {
+  await runQuery(
+    `UPDATE dockships_sellers
+     SET domain_status = ?,
+         best_email = ?,
+         crawled_at = datetime('now')
+     WHERE id = ?`,
+    [outcome.domainStatus, outcome.bestEmail, id]
+  );
 }
 
 /**
- * Crawl a single seller domain and write the result to the DB.
- * Extracted so it can be run concurrently across multiple workers.
+ * Crawl a single seller domain and persist the result immediately,
+ * so results survive even if the process is interrupted mid-crawl.
  */
 async function crawlOneSeller(seller: { id: string; domain: string }): Promise<void> {
   const cleanDomain = seller.domain ? seller.domain.trim() : '';
   if (!cleanDomain || cleanDomain === 'none') {
-    await runQuery(
-      `UPDATE dockships_sellers
-       SET domain_status = 'failed',
-           ads_txt_status = 'not present',
-           ads_detected = 'none',
-           fetched_emails = '[]',
-           best_email = NULL,
-           crawled_at = datetime('now')
-       WHERE id = ?`,
-      [seller.id]
-    );
+    await saveOutcome(seller.id, { domainStatus: 'failed', bestEmail: null });
     return;
   }
 
+  let timer: NodeJS.Timeout | undefined;
   try {
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Crawl timeout after ${SELLER_DOMAIN_CRAWL_TIMEOUT_MS}ms`)), SELLER_DOMAIN_CRAWL_TIMEOUT_MS)
-    );
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('timeout')), SELLER_DOMAIN_CRAWL_TIMEOUT_MS);
+    });
     const result = await Promise.race([crawlWebsite(cleanDomain), timeoutPromise]);
-    await runQuery(
-      `UPDATE dockships_sellers
-       SET domain_status = ?,
-           ads_txt_status = ?,
-           ads_detected = ?,
-           fetched_emails = ?,
-           best_email = ?,
-           crawled_at = datetime('now')
-       WHERE id = ?`,
-      [
-        result.domainStatus,
-        result.adsTxtStatus,
-        result.adsDetected,
-        JSON.stringify(result.emails),
-        result.bestEmail || null,
-        seller.id
-      ]
+    await saveOutcome(seller.id, result);
+  } catch {
+    await saveOutcome(seller.id, { domainStatus: 'failed', bestEmail: null }).catch(err =>
+      console.error(`[Sellers Crawl] Failed to save result for ${cleanDomain}:`, err)
     );
-  } catch (err: any) {
-    const isTimeout = err?.message?.includes('timeout');
-    console.warn(`[Sellers Crawl] ${isTimeout ? 'Timeout' : 'Error'} for ${cleanDomain}: ${err?.message}`);
-    await runQuery(
-      `UPDATE dockships_sellers
-       SET domain_status = 'failed',
-           ads_txt_status = 'not present',
-           ads_detected = 'none',
-           fetched_emails = '[]',
-           best_email = NULL,
-           crawled_at = datetime('now')
-       WHERE id = ?`,
-      [seller.id]
-    );
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
 /**
- * Background crawl loop — concurrent 8-worker pool.
+ * Background crawl — continuous worker pool.
  *
- * Architecture:
- * - Fetches 40 pending sellers at a time from the DB.
- * - Splits them into chunks of CRAWL_CONCURRENCY (8) and runs all in parallel.
- * - Promise.allSettled ensures one slow/failed domain never blocks others.
- * - No inter-batch sleep — batches are continuous until all pending done.
- * - Per-domain timeout: 12s (was 45s).
- *
- * Throughput: ~8 domains / ~2s avg = ~4 domains/sec = 1000 sellers in ~4 min.
+ * - Claims pending rows in large batches (few DB round trips).
+ * - N workers pull from a shared queue: a slow domain only occupies ONE worker,
+ *   never a whole chunk (the old chunked approach waited on the slowest domain).
+ * - Each result is written to SQLite as soon as it is ready.
  */
 async function crawlSellersBackground(companyDomain: string) {
   if (activeSellersCrawlers[companyDomain] === true) return;
   activeSellersCrawlers[companyDomain] = true;
 
-  console.log(`[Sellers Crawl] Starting concurrent crawl (${CRAWL_CONCURRENCY} workers) for ${companyDomain}`);
-
-  const crawlStartedAt = Date.now();
-  const MAX_CRAWL_DURATION_MS = 6 * 60 * 60 * 1000;
+  console.log(`[Sellers Crawl] Starting (${CRAWL_CONCURRENCY} workers) for ${companyDomain}`);
+  const startedAt = Date.now();
+  let processed = 0;
 
   try {
     while (activeSellersCrawlers[companyDomain] === true) {
-      if (Date.now() - crawlStartedAt > MAX_CRAWL_DURATION_MS) {
-        console.warn(`[Sellers Crawl] 6-hour safety limit reached for ${companyDomain}. Terminating.`);
-        break;
-      }
-
-      // Fetch a large batch so we don't hammer the DB on every iteration
-      const pendingSellers = await allRows<{ id: string; domain: string }>(
-        "SELECT id, domain FROM dockships_sellers WHERE company_domain = ? AND domain_status = 'pending' LIMIT 40",
-        [companyDomain]
+      const batch = await allRows<{ id: string; domain: string }>(
+        "SELECT id, domain FROM dockships_sellers WHERE company_domain = ? AND domain_status = 'pending' LIMIT ?",
+        [companyDomain, CRAWL_BATCH_SIZE]
       );
+      if (batch.length === 0) break;
 
-      if (pendingSellers.length === 0) {
-        console.log(`[Sellers Crawl] No more pending sellers for ${companyDomain}`);
-        break;
-      }
-
-      // Process in concurrent chunks of CRAWL_CONCURRENCY
-      for (let i = 0; i < pendingSellers.length; i += CRAWL_CONCURRENCY) {
-        if (activeSellersCrawlers[companyDomain] !== true) break;
-
-        const chunk = pendingSellers.slice(i, i + CRAWL_CONCURRENCY);
-        // allSettled — a single domain failure never aborts the chunk
-        await Promise.allSettled(chunk.map(seller => crawlOneSeller(seller)));
-      }
-      // No artificial delay — loop immediately to pick up the next batch
+      let cursor = 0;
+      const worker = async () => {
+        while (activeSellersCrawlers[companyDomain] === true) {
+          const idx = cursor++;
+          if (idx >= batch.length) return;
+          await crawlOneSeller(batch[idx]);
+          processed++;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(CRAWL_CONCURRENCY, batch.length) }, worker));
     }
   } catch (err) {
     console.error(`[Sellers Crawl] Fatal error for ${companyDomain}:`, err);
   } finally {
     delete activeSellersCrawlers[companyDomain];
-    console.log(`[Sellers Crawl] Stopped for ${companyDomain}`);
+    const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+    console.log(`[Sellers Crawl] Stopped for ${companyDomain} — ${processed} domains in ${secs}s`);
+  }
+}
+
+/** Resume any crawls interrupted by a restart/redeploy. */
+async function resumeInterruptedCrawls() {
+  try {
+    const rows = await allRows<{ company_domain: string }>(
+      "SELECT DISTINCT company_domain FROM dockships_sellers WHERE domain_status = 'pending'"
+    );
+    for (const r of rows) crawlSellersBackground(r.company_domain);
+  } catch (err) {
+    console.error('[Sellers Crawl] Resume check failed:', err);
   }
 }
 
@@ -353,32 +289,50 @@ app.post('/api/sellers/fetch', async (req, res) => {
   }
 });
 
+/** Builds the shared WHERE clause used by both the list and export endpoints. */
+function buildSellerFilter(domain: string, search: unknown, domainStatus: unknown, emailFilter: unknown) {
+  let where = 'WHERE company_domain = ?';
+  const params: any[] = [domain];
+
+  const s = String(search || '').trim();
+  if (s) {
+    where += ' AND (domain LIKE ? OR name LIKE ? OR seller_id LIKE ? OR best_email LIKE ?)';
+    params.push(`%${s}%`, `%${s}%`, `%${s}%`, `%${s}%`);
+  }
+  if (domainStatus && domainStatus !== 'all') {
+    where += ' AND domain_status = ?';
+    params.push(String(domainStatus));
+  }
+  if (emailFilter === 'found') where += " AND best_email IS NOT NULL AND best_email != ''";
+  if (emailFilter === 'missing') where += " AND (best_email IS NULL OR best_email = '')";
+
+  return { where, params };
+}
+
 /**
  * GET /api/sellers
  * Paginated sellers list for a company with stats, search, and status filters.
  */
 app.get('/api/sellers', async (req, res) => {
-  await restoreSellersSnapshot();
-  const { companyDomain, page = '1', limit = '50', search = '', domainStatus = 'all', adsTxtStatus = 'all' } = req.query;
+  const { companyDomain, page = '1', limit = '50', search = '', domainStatus = 'all', emailFilter = 'all' } = req.query;
 
   if (!companyDomain) {
     return res.status(400).json({ error: 'companyDomain query parameter is required.' });
   }
 
   const domain = String(companyDomain).trim().toLowerCase();
-  const pageNum = parseInt(String(page), 10) || 1;
-  const limitNum = parseInt(String(limit), 10) || 50;
+  const pageNum = Math.max(parseInt(String(page), 10) || 1, 1);
+  const limitNum = Math.min(Math.max(parseInt(String(limit), 10) || 50, 1), 500);
   const offset = (pageNum - 1) * limitNum;
 
   try {
     const stats = await getRow<any>(
-      `SELECT 
+      `SELECT
          COUNT(*) as total,
          SUM(CASE WHEN domain_status = 'pending' THEN 1 ELSE 0 END) as pending,
          SUM(CASE WHEN domain_status = 'pass' THEN 1 ELSE 0 END) as live,
          SUM(CASE WHEN domain_status = 'failed' THEN 1 ELSE 0 END) as failed,
-         SUM(CASE WHEN ads_txt_status = 'present' THEN 1 ELSE 0 END) as adsTxtPresent,
-         SUM(CASE WHEN ads_txt_status = 'not present' THEN 1 ELSE 0 END) as adsTxtNotPresent
+         SUM(CASE WHEN best_email IS NOT NULL AND best_email != '' THEN 1 ELSE 0 END) as emailsFound
        FROM dockships_sellers
        WHERE company_domain = ?`,
       [domain]
@@ -389,43 +343,25 @@ app.get('/api/sellers', async (req, res) => {
       pending: stats?.pending || 0,
       live: stats?.live || 0,
       failed: stats?.failed || 0,
-      adsTxtPresent: stats?.adsTxtPresent || 0,
-      adsTxtNotPresent: stats?.adsTxtNotPresent || 0,
+      emailsFound: stats?.emailsFound || 0,
       crawling: !!activeSellersCrawlers[domain]
     };
 
-    let filterQuery = 'WHERE company_domain = ?';
-    const params: any[] = [domain];
-
-    if (search) {
-      filterQuery += ' AND (domain LIKE ? OR name LIKE ? OR seller_id LIKE ? OR best_email LIKE ?)';
-      const searchParam = `%${String(search).trim()}%`;
-      params.push(searchParam, searchParam, searchParam, searchParam);
-    }
-
-    if (domainStatus !== 'all') {
-      filterQuery += ' AND domain_status = ?';
-      params.push(domainStatus);
-    }
-
-    if (adsTxtStatus !== 'all') {
-      filterQuery += ' AND ads_txt_status = ?';
-      params.push(adsTxtStatus);
-    }
+    const { where, params } = buildSellerFilter(domain, search, domainStatus, emailFilter);
 
     const totalMatchingRow = await getRow<{ count: number }>(
-      `SELECT COUNT(*) as count FROM dockships_sellers ${filterQuery}`,
+      `SELECT COUNT(*) as count FROM dockships_sellers ${where}`,
       params
     );
     const totalMatching = totalMatchingRow?.count || 0;
 
-    const listParams = [...params, limitNum, offset];
     const sellers = await allRows<any>(
-      `SELECT * FROM dockships_sellers 
-       ${filterQuery} 
-       ORDER BY domain_status ASC, domain ASC 
+      `SELECT id, company_domain, seller_id, name, seller_type, domain, domain_status, best_email, crawled_at, created_at
+       FROM dockships_sellers
+       ${where}
+       ORDER BY domain ASC
        LIMIT ? OFFSET ?`,
-      listParams
+      [...params, limitNum, offset]
     );
 
     return res.json({
@@ -440,6 +376,66 @@ app.get('/api/sellers', async (req, res) => {
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to fetch sellers.' });
+  }
+});
+
+function csvCell(value: unknown): string {
+  const str = value == null ? '' : String(value);
+  // Neutralise spreadsheet formula injection, then quote everything
+  const safe = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+/**
+ * GET /api/sellers/export?companyDomain=...
+ * Streams the complete result set as CSV straight from the database.
+ * Never returns a header-only file: if there is nothing to export it responds 404 JSON instead.
+ */
+app.get('/api/sellers/export', async (req, res) => {
+  const { companyDomain, search = '', domainStatus = 'all', emailFilter = 'all' } = req.query;
+  if (!companyDomain) {
+    return res.status(400).json({ error: 'companyDomain query parameter is required.' });
+  }
+
+  const domain = String(companyDomain).trim().toLowerCase();
+  const { where, params } = buildSellerFilter(domain, search, domainStatus, emailFilter);
+
+  try {
+    const countRow = await getRow<{ count: number }>(
+      `SELECT COUNT(*) as count FROM dockships_sellers ${where}`,
+      params
+    );
+    if (!countRow || countRow.count === 0) {
+      return res.status(404).json({
+        error: 'No data available to export. The server may have restarted and cleared earlier results — please re-run the crawl.'
+      });
+    }
+
+    const filename = `${domain.replace(/[^a-z0-9.\-]/gi, '_')}_sellers_${new Date().toISOString().split('T')[0]}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.write('\uFEFF'); // UTF-8 BOM so Excel reads it correctly
+    res.write('Domain,Domain Status,Best Email\r\n');
+
+    const PAGE = 2000;
+    for (let offset = 0; offset < countRow.count; offset += PAGE) {
+      const rows = await allRows<{ domain: string; domain_status: string; best_email: string | null }>(
+        `SELECT domain, domain_status, best_email FROM dockships_sellers ${where} ORDER BY domain ASC LIMIT ? OFFSET ?`,
+        [...params, PAGE, offset]
+      );
+      const chunk = rows
+        .map(r => [
+          csvCell(r.domain),
+          csvCell(r.domain_status === 'pass' ? 'Live' : r.domain_status === 'failed' ? 'Not Working' : 'Pending'),
+          csvCell(r.best_email || '')
+        ].join(','))
+        .join('\r\n');
+      if (chunk) res.write(chunk + '\r\n');
+    }
+    return res.end();
+  } catch (err: any) {
+    if (!res.headersSent) return res.status(500).json({ error: err.message || 'Export failed.' });
+    return res.end();
   }
 });
 
