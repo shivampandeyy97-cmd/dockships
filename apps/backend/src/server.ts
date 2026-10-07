@@ -175,10 +175,138 @@ async function resumeInterruptedCrawls() {
   }
 }
 
+let isPipelineActive = false;
+
+/** Helper function to fetch & import a single company domain's sellers.json */
+async function fetchSellersJsonAndImport(companyDomain: string): Promise<{ domain: string; count: number }> {
+  let domain = companyDomain.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./i, '');
+  if (!domain.includes('.')) {
+    domain = domain + '.com';
+  }
+
+  const userAgentString = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  let responseData: any = null;
+
+  try {
+    const response = await axios.get(`https://${domain}/sellers.json`, {
+      headers: { 'User-Agent': userAgentString },
+      timeout: 10000,
+      maxRedirects: 5
+    });
+    responseData = response.data;
+  } catch {
+    const response = await axios.get(`http://${domain}/sellers.json`, {
+      headers: { 'User-Agent': userAgentString },
+      timeout: 10000,
+      maxRedirects: 5
+    });
+    responseData = response.data;
+  }
+
+  let json: any = responseData;
+  if (typeof responseData === 'string') {
+    json = JSON.parse(responseData);
+  }
+
+  if (!json || !Array.isArray(json.sellers)) {
+    throw new Error(`Invalid sellers.json format from ${domain} — missing "sellers" array.`);
+  }
+
+  const rawSellers = json.sellers;
+  const sellersToInsert = rawSellers.filter((s: any) => {
+    const hasDomain = s.domain && typeof s.domain === 'string' && s.domain.trim().length > 0;
+    const isDeleted = s.is_deleted === true || s.is_deleted === 1 || s.is_deleted === 'true';
+    return hasDomain && !isDeleted;
+  });
+
+  if (sellersToInsert.length === 0) {
+    return { domain, count: 0 };
+  }
+
+  const chunkSize = 100;
+  for (let i = 0; i < sellersToInsert.length; i += chunkSize) {
+    const chunk = sellersToInsert.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, 0)').join(', ');
+    const query = `
+      INSERT INTO dockships_sellers (id, company_domain, seller_id, name, seller_type, domain, is_deleted)
+      VALUES ${placeholders}
+      ON CONFLICT(company_domain, domain) DO UPDATE SET
+        seller_id = excluded.seller_id,
+        name = excluded.name,
+        seller_type = excluded.seller_type,
+        is_deleted = excluded.is_deleted
+    `;
+
+    const params: any[] = [];
+    chunk.forEach((s: any) => {
+      params.push(
+        crypto.randomUUID(),
+        domain,
+        String(s.seller_id || ''),
+        String(s.name || ''),
+        String(s.seller_type || ''),
+        String(s.domain || '').trim().toLowerCase()
+      );
+    });
+
+    await runQuery(query, params);
+  }
+
+  return { domain, count: sellersToInsert.length };
+}
+
+/**
+ * Pipeline Runner: Automatically switches to the next sellers.json website
+ * in the queue as soon as the previous one finishes fetching & crawling!
+ */
+async function processPipelineQueue() {
+  if (isPipelineActive) return;
+  isPipelineActive = true;
+
+  console.log('[Pipeline] Starting automatic multi-sellers.json pipeline processing loop...');
+  try {
+    while (isPipelineActive) {
+      const item = await getRow<{ id: string; domain: string }>(
+        "SELECT id, domain FROM seller_pipeline_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
+      );
+
+      if (!item) {
+        console.log('[Pipeline] No more pending sellers.json websites in queue.');
+        break;
+      }
+
+      console.log(`[Pipeline] Processing next sellers.json website: ${item.domain}`);
+      await runQuery("UPDATE seller_pipeline_queue SET status = 'processing', updated_at = datetime('now') WHERE id = ?", [item.id]);
+
+      try {
+        const { domain, count } = await fetchSellersJsonAndImport(item.domain);
+        await runQuery("UPDATE seller_pipeline_queue SET imported_count = ? WHERE id = ?", [count, item.id]);
+
+        if (count > 0) {
+          // Crawl all sellers for this domain in background and wait until completed
+          await crawlSellersBackground(domain);
+        }
+
+        await runQuery("UPDATE seller_pipeline_queue SET status = 'completed', updated_at = datetime('now') WHERE id = ?", [item.id]);
+        console.log(`[Pipeline] Successfully finished ${domain} (${count} sellers fetched & crawled). Auto-switching to next website...`);
+      } catch (err: any) {
+        console.error(`[Pipeline] Error processing ${item.domain}:`, err.message);
+        await runQuery(
+          "UPDATE seller_pipeline_queue SET status = 'failed', error_message = ?, updated_at = datetime('now') WHERE id = ?",
+          [String(err.message || 'Fetch failed'), item.id]
+        );
+      }
+    }
+  } catch (err) {
+    console.error('[Pipeline] Unhandled error in pipeline queue runner:', err);
+  } finally {
+    isPipelineActive = false;
+  }
+}
+
 /**
  * POST /api/sellers/fetch
- * Fetches a company's sellers.json and imports all active sellers into the DB.
- * Then kicks off a background crawl.
+ * Fetches a single company's sellers.json and imports all active sellers into the DB.
  */
 app.post('/api/sellers/fetch', async (req, res) => {
   const { companyDomain } = req.body;
@@ -186,103 +314,20 @@ app.post('/api/sellers/fetch', async (req, res) => {
     return res.status(400).json({ error: 'Company website / domain is required.' });
   }
 
-  let domain = companyDomain.trim().toLowerCase().replace(/^https?:\/\//i, '').replace(/^www\./i, '');
-  if (!domain.includes('.')) {
-    domain = domain + '.com';
-  }
-
-  const userAgentString = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
   try {
-    let sellersUrl = `https://${domain}/sellers.json`;
-    let responseData: any = null;
-
-    try {
-      const response = await axios.get(sellersUrl, {
-        headers: { 'User-Agent': userAgentString },
-        timeout: 8000,
-        maxRedirects: 5
-      });
-      responseData = response.data;
-    } catch {
-      const httpUrl = `http://${domain}/sellers.json`;
-      try {
-        const response = await axios.get(httpUrl, {
-          headers: { 'User-Agent': userAgentString },
-          timeout: 8000,
-          maxRedirects: 5
-        });
-        responseData = response.data;
-      } catch (httpErr: any) {
-        return res.status(400).json({
-          error: `Failed to fetch sellers.json from ${domain}. Error: ${httpErr.message}`
-        });
-      }
+    const { domain, count } = await fetchSellersJsonAndImport(companyDomain);
+    if (count > 0) {
+      crawlSellersBackground(domain);
     }
-
-    let json: any = responseData;
-    if (typeof responseData === 'string') {
-      try {
-        json = JSON.parse(responseData);
-      } catch {
-        return res.status(400).json({ error: 'Failed to parse sellers.json — invalid JSON.' });
-      }
-    }
-
-    if (!json || !Array.isArray(json.sellers)) {
-      return res.status(400).json({ error: 'Invalid sellers.json format. Missing "sellers" array.' });
-    }
-
-    const rawSellers = json.sellers;
-    const sellersToInsert = rawSellers.filter((s: any) => {
-      const hasDomain = s.domain && typeof s.domain === 'string' && s.domain.trim().length > 0;
-      const isDeleted = s.is_deleted === true || s.is_deleted === 1 || s.is_deleted === 'true';
-      return hasDomain && !isDeleted;
-    });
-
-    if (sellersToInsert.length === 0) {
-      return res.json({ success: true, count: 0, message: 'No active sellers found with valid domains.' });
-    }
-
-    // Bulk-insert in chunks of 100 to stay within SQLite parameter limits
-    const chunkSize = 100;
-    for (let i = 0; i < sellersToInsert.length; i += chunkSize) {
-      const chunk = sellersToInsert.slice(i, i + chunkSize);
-      const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, 0)').join(', ');
-      const query = `
-        INSERT INTO dockships_sellers (id, company_domain, seller_id, name, seller_type, domain, is_deleted)
-        VALUES ${placeholders}
-        ON CONFLICT(company_domain, domain) DO UPDATE SET
-          seller_id = excluded.seller_id,
-          name = excluded.name,
-          seller_type = excluded.seller_type,
-          is_deleted = excluded.is_deleted
-      `;
-
-      const params: any[] = [];
-      chunk.forEach((s: any) => {
-        params.push(
-          crypto.randomUUID(),
-          domain,
-          String(s.seller_id || ''),
-          String(s.name || ''),
-          String(s.seller_type || ''),
-          String(s.domain || '').trim().toLowerCase()
-        );
-      });
-
-      await runQuery(query, params);
-    }
-
-    // Start background crawl (non-blocking)
-    crawlSellersBackground(domain);
     saveSellersSnapshot().catch(err => console.error('Snapshot save error:', err));
 
     return res.json({
       success: true,
-      count: sellersToInsert.length,
+      count,
       companyDomain: domain,
-      message: `Successfully imported ${sellersToInsert.length} active sellers. Crawler starting in background.`
+      message: count > 0
+        ? `Successfully imported ${count} active sellers. Crawler starting in background.`
+        : 'No active sellers found with valid domains.'
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Internal error fetching sellers.json' });
@@ -501,6 +546,127 @@ app.get('/api/sellers/companies', async (_req, res) => {
     return res.json(rows.map(r => r.company_domain));
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PIPELINE QUEUE API ROUTES (Auto-switch across 15+ sellers.json websites)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/sellers/pipeline/add
+ * Accepts an array or text list of domains (e.g. 15+ websites), adds them to the queue,
+ * and kicks off automatic processing.
+ */
+app.post('/api/sellers/pipeline/add', async (req, res) => {
+  const { domains } = req.body;
+  if (!domains) {
+    return res.status(400).json({ error: 'At least one company domain is required.' });
+  }
+
+  let domainList: string[] = [];
+  if (Array.isArray(domains)) {
+    domainList = domains.map(d => String(d).trim().toLowerCase());
+  } else if (typeof domains === 'string') {
+    domainList = domains
+      .split(/[\n,;\s]+/)
+      .map(d => d.trim().toLowerCase())
+      .filter(d => d.length > 0);
+  }
+
+  const cleanedList: string[] = [];
+  for (let d of domainList) {
+    d = d.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+    if (d && d.includes('.')) {
+      cleanedList.push(d);
+    } else if (d && !d.includes('.')) {
+      cleanedList.push(d + '.com');
+    }
+  }
+
+  const uniqueDomains = Array.from(new Set(cleanedList));
+  if (uniqueDomains.length === 0) {
+    return res.status(400).json({ error: 'No valid company domains provided.' });
+  }
+
+  try {
+    for (const d of uniqueDomains) {
+      await runQuery(
+        `INSERT INTO seller_pipeline_queue (id, domain, status, updated_at)
+         VALUES (?, ?, 'pending', datetime('now'))
+         ON CONFLICT(domain) DO UPDATE SET
+           status = CASE WHEN status = 'failed' THEN 'pending' ELSE status END`,
+        [crypto.randomUUID(), d]
+      );
+    }
+
+    // Trigger pipeline worker (non-blocking)
+    processPipelineQueue();
+
+    return res.json({
+      success: true,
+      addedCount: uniqueDomains.length,
+      domains: uniqueDomains,
+      message: `Added ${uniqueDomains.length} sellers.json website(s) to pipeline. Auto-switching crawler active.`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to add domains to pipeline queue.' });
+  }
+});
+
+/**
+ * GET /api/sellers/pipeline
+ * Get current pipeline queue status and list of domains.
+ */
+app.get('/api/sellers/pipeline', async (_req, res) => {
+  try {
+    const queue = await allRows<any>(
+      'SELECT id, domain, status, imported_count, error_message, created_at, updated_at FROM seller_pipeline_queue ORDER BY created_at ASC'
+    );
+    return res.json({
+      success: true,
+      isPipelineActive,
+      total: queue.length,
+      pending: queue.filter(q => q.status === 'pending').length,
+      processing: queue.filter(q => q.status === 'processing').length,
+      completed: queue.filter(q => q.status === 'completed').length,
+      failed: queue.filter(q => q.status === 'failed').length,
+      queue
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch pipeline status.' });
+  }
+});
+
+/**
+ * POST /api/sellers/pipeline/start
+ * Start or resume the automatic pipeline worker loop.
+ */
+app.post('/api/sellers/pipeline/start', async (_req, res) => {
+  processPipelineQueue();
+  return res.json({ success: true, isPipelineActive: true, message: 'Pipeline queue worker started.' });
+});
+
+/**
+ * POST /api/sellers/pipeline/stop
+ * Pause / stop the pipeline queue loop.
+ */
+app.post('/api/sellers/pipeline/stop', async (_req, res) => {
+  isPipelineActive = false;
+  return res.json({ success: true, isPipelineActive: false, message: 'Pipeline queue worker stop requested.' });
+});
+
+/**
+ * POST /api/sellers/pipeline/clear
+ * Clear all pipeline queue items.
+ */
+app.post('/api/sellers/pipeline/clear', async (_req, res) => {
+  try {
+    isPipelineActive = false;
+    await runQuery('DELETE FROM seller_pipeline_queue');
+    return res.json({ success: true, message: 'Pipeline queue cleared.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to clear pipeline queue.' });
   }
 });
 

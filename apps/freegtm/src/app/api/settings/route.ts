@@ -9,8 +9,9 @@ import { getAllSettings, setSetting } from '@/lib/db';
 
 // Keys that are stored — everything else is ignored
 const ALLOWED_KEYS = [
-  'llm_provider',         // 'anthropic' | 'openai' | 'ollama'
-  'llm_api_key',          // Anthropic or OpenAI key
+  'llm_provider',         // 'anthropic' | 'openai' | 'gemini' | 'ollama'
+  'llm_api_key',          // Anthropic, OpenAI, or Gemini key
+  'gemini_api_key',       // Google Gemini API key
   'ollama_url',           // Ollama base URL
   'ollama_model',         // Ollama model name
   'apollo_api_key',       // Apollo.io free plan key

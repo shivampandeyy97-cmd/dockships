@@ -77,6 +77,16 @@ export async function initializeSchema(): Promise<void> {
       data TEXT NOT NULL,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS seller_pipeline_queue (
+      id TEXT PRIMARY KEY,
+      domain TEXT UNIQUE NOT NULL,
+      status TEXT DEFAULT 'pending',
+      imported_count INTEGER DEFAULT 0,
+      error_message TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `;
 
   return new Promise((resolve, reject) => {

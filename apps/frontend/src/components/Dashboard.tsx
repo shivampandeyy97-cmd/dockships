@@ -34,6 +34,26 @@ interface Pagination {
   pages: number;
 }
 
+interface PipelineItem {
+  id: string;
+  domain: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  imported_count: number;
+  error_message?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PipelineStatus {
+  isPipelineActive: boolean;
+  total: number;
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  queue: PipelineItem[];
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const csvCacheKey = (company: string) => `dockships_csv_${company}`;
@@ -195,6 +215,65 @@ export const Dashboard: React.FC = () => {
   // Track how many sellers we currently have — if 0, show initial loader
   const hasDataRef = useRef(false);
 
+  // Pipeline Queue state
+  const [showPipelineModal, setShowPipelineModal] = useState(false);
+  const [pipelineInput, setPipelineInput] = useState('');
+  const [addingPipeline, setAddingPipeline] = useState(false);
+  const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>({
+    isPipelineActive: false, total: 0, pending: 0, processing: 0, completed: 0, failed: 0, queue: []
+  });
+
+  const fetchPipelineStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/sellers/pipeline`);
+      if (res.ok) {
+        const data = await res.json();
+        setPipelineStatus(data);
+      }
+    } catch (e) {
+      console.error('Error fetching pipeline status:', e);
+    }
+  }, []);
+
+  const handleAddPipeline = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pipelineInput.trim()) return;
+    setAddingPipeline(true);
+    try {
+      const res = await fetch(`${API_URL}/api/sellers/pipeline/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domains: pipelineInput })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to add domains to pipeline');
+
+      setPipelineInput('');
+      await fetchPipelineStatus();
+      await fetchCompanies();
+    } catch (err: any) {
+      alert(err.message || 'Error adding domains to pipeline');
+    } finally {
+      setAddingPipeline(false);
+    }
+  };
+
+  const handleStartPipeline = async () => {
+    await fetch(`${API_URL}/api/sellers/pipeline/start`, { method: 'POST' });
+    fetchPipelineStatus();
+  };
+
+  const handleStopPipeline = async () => {
+    await fetch(`${API_URL}/api/sellers/pipeline/stop`, { method: 'POST' });
+    fetchPipelineStatus();
+  };
+
+  const handleClearPipeline = async () => {
+    if (!window.confirm('Clear all items from the pipeline queue?')) return;
+    await fetch(`${API_URL}/api/sellers/pipeline/clear`, { method: 'POST' });
+    fetchPipelineStatus();
+  };
+
   // ─── Data fetching ──────────────────────────────────────────────────────────
 
   const fetchCompanies = useCallback(async () => {
@@ -282,7 +361,10 @@ export const Dashboard: React.FC = () => {
   // ─── Effects ────────────────────────────────────────────────────────────────
 
   // Initial load
-  useEffect(() => { fetchCompanies(); }, [fetchCompanies]);
+  useEffect(() => {
+    fetchCompanies();
+    fetchPipelineStatus();
+  }, [fetchCompanies, fetchPipelineStatus]);
 
   // Auto-select first company on initial load
   useEffect(() => {
@@ -308,6 +390,8 @@ export const Dashboard: React.FC = () => {
   // Uses refs so it always has fresh values without causing effect re-runs
   useEffect(() => {
     const id = setInterval(() => {
+      fetchPipelineStatus();
+      fetchCompanies();
       if (crawlingRef.current && selectedCompanyRef.current) {
         fetchSellers(
           selectedCompanyRef.current,
@@ -320,7 +404,7 @@ export const Dashboard: React.FC = () => {
       }
     }, 3000);
     return () => clearInterval(id);
-  }, [fetchSellers]); // fetchSellers has no deps itself, so this runs once
+  }, [fetchSellers, fetchPipelineStatus, fetchCompanies]); // fetchSellers has no deps itself, so this runs once
 
   // ─── Actions ────────────────────────────────────────────────────────────────
 
@@ -769,6 +853,22 @@ export const Dashboard: React.FC = () => {
               </>
             ) : '⬇ Fetch sellers.json'}
           </button>
+          <button
+            id="open-pipeline-modal-btn"
+            type="button"
+            style={{
+              ...S.btnOutline,
+              borderColor: pipelineStatus.isPipelineActive ? '#fbbf24' : 'rgba(245,158,11,0.4)',
+              color: '#fbbf24',
+              background: pipelineStatus.isPipelineActive ? 'rgba(245,158,11,0.15)' : 'transparent',
+              padding: '10px 18px',
+              fontSize: '0.9rem'
+            }}
+            onClick={() => setShowPipelineModal(true)}
+          >
+            ⚡ {pipelineStatus.isPipelineActive ? 'Pipeline Running…' : 'Batch Pipeline (15+ sites)'}
+            {pipelineStatus.total > 0 && ` (${pipelineStatus.completed}/${pipelineStatus.total})`}
+          </button>
         </form>
 
         {fetchError && <div id="fetch-error" style={S.errorMsg}>{fetchError}</div>}
@@ -904,6 +1004,206 @@ export const Dashboard: React.FC = () => {
           </div>
         )}
           </>
+        )}
+
+        {/* Batch Pipeline Queue Modal */}
+        {showPipelineModal && (
+          <div
+            id="pipeline-modal-backdrop"
+            style={{
+              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+              background: 'rgba(6,13,26,0.85)', backdropFilter: 'blur(12px)',
+              zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              padding: 20
+            }}
+            onClick={e => { if (e.target === e.currentTarget) setShowPipelineModal(false); }}
+          >
+            <div style={{
+              width: '100%', maxWidth: 840, maxHeight: '90vh',
+              background: '#0a1628', border: '1px solid rgba(0,212,177,0.3)',
+              borderRadius: 18, padding: 28, overflowY: 'auto',
+              boxShadow: '0 20px 50px rgba(0,0,0,0.6)'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                <div>
+                  <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f0fdfa', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>⚡</span> Multi-sellers.json Pipeline Queue
+                  </h2>
+                  <p style={{ fontSize: '0.82rem', color: '#9ca3af', marginTop: 4 }}>
+                    Add 15+ company domains. The crawler will automatically fetch each <code>sellers.json</code> and crawl all sellers in sequence, automatically switching to the next website when finished.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  style={{ background: 'transparent', border: 'none', color: '#9ca3af', fontSize: '1.5rem', cursor: 'pointer' }}
+                  onClick={() => setShowPipelineModal(false)}
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Add Domains Form */}
+              <form onSubmit={handleAddPipeline} style={{ marginBottom: 24 }}>
+                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#00d4b1', marginBottom: 6 }}>
+                  ADD WEBSITES TO PIPELINE (15+ domains accepted):
+                </label>
+                <textarea
+                  id="pipeline-domains-input"
+                  rows={4}
+                  style={{
+                    width: '100%', padding: '12px 14px', borderRadius: 10,
+                    background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(0,212,177,0.2)',
+                    color: '#f0fdfa', fontSize: '0.88rem', fontFamily: 'monospace',
+                    outline: 'none', resize: 'vertical', marginBottom: 12
+                  }}
+                  placeholder={`kargo.com\nrubiconproject.com\npubmatic.com\nopenx.com\nmagnite.com\ntriplelift.com\nsharethrough.com\ncasale-media.com\nappnexus.com\nindexexchange.com\nsovrn.com\nsmaato.com\nteads.tv\ngumgum.com\nyieldmo.com`}
+                  value={pipelineInput}
+                  onChange={e => setPipelineInput(e.target.value)}
+                />
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    style={{ ...S.btnOutline, fontSize: '0.8rem', padding: '6px 12px' }}
+                    onClick={() => {
+                      const samples = [
+                        'kargo.com', 'rubiconproject.com', 'pubmatic.com', 'openx.com', 'magnite.com',
+                        'triplelift.com', 'sharethrough.com', 'casale-media.com', 'appnexus.com', 'indexexchange.com',
+                        'sovrn.com', 'smaato.com', 'teads.tv', 'gumgum.com', 'yieldmo.com'
+                      ].join('\n');
+                      setPipelineInput(samples);
+                    }}
+                  >
+                    + Load 15 Sample Ad-Tech Domains
+                  </button>
+                  <button
+                    type="submit"
+                    style={{ ...S.btnTeal, marginLeft: 'auto' }}
+                    disabled={addingPipeline || !pipelineInput.trim()}
+                  >
+                    {addingPipeline ? 'Adding…' : '🚀 Add to Queue & Start Auto-Crawl'}
+                  </button>
+                </div>
+              </form>
+
+              {/* Status Header & Controls */}
+              <div style={{
+                background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 12, padding: 16, marginBottom: 20
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#f0fdfa' }}>
+                      Pipeline Progress: {pipelineStatus.completed} / {pipelineStatus.total} Completed
+                    </span>
+                    {pipelineStatus.isPipelineActive ? (
+                      <span style={{
+                        padding: '2px 8px', borderRadius: 9999, fontSize: '0.72rem', fontWeight: 700,
+                        background: 'rgba(0,212,177,0.15)', color: '#00d4b1', border: '1px solid rgba(0,212,177,0.3)',
+                        display: 'inline-flex', alignItems: 'center', gap: 4
+                      }}>
+                        <span style={S.dot} /> Active & Auto-Switching
+                      </span>
+                    ) : (
+                      <span style={{
+                        padding: '2px 8px', borderRadius: 9999, fontSize: '0.72rem', fontWeight: 600,
+                        background: 'rgba(156,163,175,0.15)', color: '#9ca3af', border: '1px solid rgba(156,163,175,0.3)'
+                      }}>
+                        Idle / Paused
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {pipelineStatus.isPipelineActive ? (
+                      <button type="button" style={S.btnOutline} onClick={handleStopPipeline}>
+                        ⏸ Pause Pipeline
+                      </button>
+                    ) : (
+                      <button type="button" style={S.btnOutline} onClick={handleStartPipeline} disabled={pipelineStatus.pending === 0}>
+                        ▶ Resume Pipeline
+                      </button>
+                    )}
+                    <button type="button" style={S.btnDanger} onClick={handleClearPipeline} disabled={pipelineStatus.total === 0}>
+                      🗑 Clear Queue
+                    </button>
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                <div style={{ width: '100%', height: 6, background: 'rgba(255,255,255,0.1)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${pipelineStatus.total > 0 ? (pipelineStatus.completed / pipelineStatus.total) * 100 : 0}%`,
+                    background: 'linear-gradient(90deg, #00d4b1, #0891b2)',
+                    transition: 'width 0.4s ease'
+                  }} />
+                </div>
+              </div>
+
+              {/* Queue List Table */}
+              <div style={S.tableWrapper}>
+                {pipelineStatus.queue.length === 0 ? (
+                  <div style={S.emptyState}>
+                    <p style={{ color: '#6b7280', fontSize: '0.85rem' }}>
+                      Queue is currently empty. Paste company domains above to start automatic batch crawling.
+                    </p>
+                  </div>
+                ) : (
+                  <table style={S.table}>
+                    <thead>
+                      <tr>
+                        <th style={S.th}>#</th>
+                        <th style={S.th}>Website Domain</th>
+                        <th style={S.th}>Pipeline Status</th>
+                        <th style={S.th}>Sellers Imported</th>
+                        <th style={S.th}>Details</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pipelineStatus.queue.map((item, idx) => (
+                        <tr key={item.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                          <td style={{ padding: '10px 14px', color: '#6b7280', fontSize: '0.8rem' }}>{idx + 1}</td>
+                          <td style={{ padding: '10px 14px' }}>
+                            <button
+                              type="button"
+                              style={{ background: 'transparent', border: 'none', color: '#00d4b1', fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}
+                              onClick={() => {
+                                setSelectedCompany(item.domain);
+                                setShowPipelineModal(false);
+                              }}
+                            >
+                              {item.domain}
+                            </button>
+                          </td>
+                          <td style={{ padding: '10px 14px' }}>
+                            {item.status === 'processing' && (
+                              <span style={{ color: '#fbbf24', fontWeight: 600, fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                <span style={{ ...S.dot, background: '#fbbf24' }} /> Fetching & Crawling…
+                              </span>
+                            )}
+                            {item.status === 'completed' && (
+                              <span style={{ color: '#00d4b1', fontWeight: 600, fontSize: '0.8rem' }}>✅ Completed</span>
+                            )}
+                            {item.status === 'pending' && (
+                              <span style={{ color: '#9ca3af', fontSize: '0.8rem' }}>⏳ Pending in Queue</span>
+                            )}
+                            {item.status === 'failed' && (
+                              <span style={{ color: '#f87171', fontWeight: 600, fontSize: '0.8rem' }}>❌ Failed</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 14px', color: '#d1faf4', fontSize: '0.85rem' }}>
+                            {item.imported_count > 0 ? item.imported_count.toLocaleString() : '—'}
+                          </td>
+                          <td style={{ padding: '10px 14px', color: '#6b7280', fontSize: '0.78rem' }}>
+                            {item.error_message ? <span style={{ color: '#f87171' }}>{item.error_message}</span> : item.status === 'completed' ? 'Auto-switched' : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>
