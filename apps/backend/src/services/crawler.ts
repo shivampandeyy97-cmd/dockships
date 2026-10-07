@@ -240,8 +240,8 @@ function rank(cands: Candidates, siteHost: string, extraHosts: string[]) {
 
 async function pickBestEmail(cands: Candidates, siteHost: string, extraHosts: string[]): Promise<string | null> {
   const ranked = rank(cands, siteHost, extraHosts);
-  for (const { email, score } of ranked.slice(0, 5)) {
-    if (score < -40) break; // only junk left
+  for (const { email, score } of ranked.slice(0, 8)) {
+    if (score < -90) break; // only bounce-risk / explicit junk left
     if (await canReceiveMail(email.split('@')[1])) return email;
   }
   return null;
@@ -254,13 +254,10 @@ async function findBestEmail(live: Liveness, host: string, cfg: Cfg): Promise<st
   const extra = [host];
   const cands = extractEmails(page.html);
 
-  const best = rank(cands, siteHost, extra)[0];
-  const strong = best && best.score >= 75; // own-domain role address found via mailto/visible text
-
-  if (!strong) {
+  // Always check top contact pages if homepage yields fewer than 2 candidates
+  if (cands.size < 2) {
     const links = discoverContactPages(page.html, page.finalUrl, cfg.contactPages);
     if (live.via === 'browser') {
-      // Site needs a real browser — fetch the best contact page the same way
       if (links[0]) {
         const bp = await fetchWithBrowser(links[0], cfg.subTimeoutMs + 6_000);
         if (bp && bp.status < 400) merge(cands, extractEmails(bp.html));

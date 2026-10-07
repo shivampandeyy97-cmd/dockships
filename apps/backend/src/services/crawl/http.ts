@@ -183,13 +183,23 @@ export interface FetchOptions {
 
 const DEFAULT_MAX_BYTES = 900_000;
 
-function decoderFor(encoding: string | undefined): NodeJS.ReadWriteStream | null {
+function decompressBuffer(buf: Buffer, encoding: string | undefined): string {
+  if (!buf || buf.length === 0) return '';
   const enc = (encoding || '').toLowerCase().trim();
-  const flush = { finishFlush: zlib.constants.Z_SYNC_FLUSH, flush: zlib.constants.Z_SYNC_FLUSH };
-  if (enc === 'gzip' || enc === 'x-gzip') return zlib.createGunzip(flush);
-  if (enc === 'deflate') return zlib.createInflate(flush);
-  if (enc === 'br') return zlib.createBrotliDecompress({ finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH, flush: zlib.constants.BROTLI_OPERATION_FLUSH });
-  return null;
+  try {
+    if (enc === 'gzip' || enc === 'x-gzip') {
+      return zlib.gunzipSync(buf).toString('utf8');
+    }
+    if (enc === 'deflate') {
+      return zlib.inflateSync(buf).toString('utf8');
+    }
+    if (enc === 'br') {
+      return zlib.brotliDecompressSync(buf).toString('utf8');
+    }
+  } catch {
+    try { return zlib.unzipSync(buf).toString('utf8'); } catch { return buf.toString('utf8'); }
+  }
+  return buf.toString('utf8');
 }
 
 /** Read (and decompress) a response body up to maxBytes. Never throws for truncation/corruption. */
@@ -198,19 +208,16 @@ function readBody(res: http.IncomingMessage, maxBytes: number): Promise<string> 
     const chunks: Buffer[] = [];
     let total = 0;
     let done = false;
-    let stream: Readable | NodeJS.ReadWriteStream = res;
-    const decoder = decoderFor(res.headers['content-encoding'] as string | undefined);
-    if (decoder) {
-      res.pipe(decoder as any);
-      stream = decoder;
-    }
+    const encoding = res.headers['content-encoding'] as string | undefined;
+
     const finish = () => {
       if (done) return;
       done = true;
       const buf = Buffer.concat(chunks);
-      resolve(buf.toString('utf8'));
+      resolve(decompressBuffer(buf, encoding));
     };
-    (stream as Readable).on('data', (chunk: Buffer) => {
+
+    res.on('data', (chunk: Buffer) => {
       if (done) return;
       chunks.push(chunk);
       total += chunk.length;
@@ -219,8 +226,7 @@ function readBody(res: http.IncomingMessage, maxBytes: number): Promise<string> 
         res.destroy();
       }
     });
-    (stream as Readable).on('end', finish);
-    (stream as Readable).on('error', finish); // keep whatever we decoded so far
+    res.on('end', finish);
     res.on('error', finish);
     res.on('aborted', finish);
     res.on('close', () => setImmediate(finish));
