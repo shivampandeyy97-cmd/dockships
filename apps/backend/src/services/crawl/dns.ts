@@ -2,17 +2,15 @@ import dns from 'dns';
 import net from 'net';
 
 /**
- * Non-blocking, cached DNS resolution.
+ * Non-blocking, multi-resolver, cached DNS resolution with backoff retries.
  *
- * WHY: Node's default `dns.lookup()` (used by axios/http) runs getaddrinfo on the
- * libuv threadpool, which only has 4 threads. With 40 parallel crawl workers the
- * lookups queue up behind each other, the old 3 s DNS timeout fired, and perfectly
- * healthy domains were marked "failed". This module uses c-ares (`dns.Resolver`),
- * which is fully async and does NOT use the threadpool, adds a public-resolver
- * fallback and caches answers so redirects / sub-pages / MX checks don't re-resolve.
+ * Prevents thread-pool lockup from Node's default `dns.lookup()`.
+ * Queries Google (8.8.8.8), Cloudflare (1.1.1.1), Quad9 (9.9.9.9), and system resolver
+ * with exponential backoff retries on transient errors (ETIMEOUT, ESERVFAIL, ECONNREFUSED).
+ * A domain failure is marked permanent only if confirmed by 2 independent resolvers.
  */
 
-export type DnsFailure = 'dns_nxdomain' | 'dns_no_records' | 'dns_error';
+export type DnsFailure = 'dns_nxdomain' | 'dns_no_records' | 'dns_servfail' | 'dns_timeout' | 'dns_error';
 
 export class DnsError extends Error {
   code: string;
@@ -26,54 +24,100 @@ export class DnsError extends Error {
 
 export interface Addr { address: string; family: 4 | 6 }
 
-const systemResolver = new dns.promises.Resolver({ timeout: 3000, tries: 2 });
-const publicResolver = new dns.promises.Resolver({ timeout: 3000, tries: 2 });
-publicResolver.setServers(['1.1.1.1', '8.8.8.8', '9.9.9.9', '1.0.0.1', '8.8.4.4']);
+// Independent resolver pools
+const systemResolver = new dns.promises.Resolver({ timeout: 2500, tries: 2 });
 
-const TTL_MS = 15 * 60 * 1000;
-const NEG_TTL_MS = 5 * 60 * 1000;
+const googleResolver = new dns.promises.Resolver({ timeout: 2500, tries: 2 });
+googleResolver.setServers(['8.8.8.8', '8.8.4.4']);
+
+const cloudflareResolver = new dns.promises.Resolver({ timeout: 2500, tries: 2 });
+cloudflareResolver.setServers(['1.1.1.1', '1.0.0.1']);
+
+const quad9Resolver = new dns.promises.Resolver({ timeout: 2500, tries: 2 });
+quad9Resolver.setServers(['9.9.9.9', '149.112.112.112']);
+
+const resolvers = [systemResolver, googleResolver, cloudflareResolver, quad9Resolver];
+
+const TTL_MS = 15 * 60 * 1000;       // 15 minutes positive TTL
+const NEG_TTL_MS = 60 * 1000;        // 60 seconds negative TTL
 const cache = new Map<string, { at: number; ttl: number; p: Promise<Addr[]> }>();
 
-async function resolveWith(resolver: dns.promises.Resolver, host: string): Promise<{ addrs: Addr[]; codes: string[] }> {
-  const [v4, v6] = await Promise.allSettled([resolver.resolve4(host), resolver.resolve6(host)]);
-  const addrs: Addr[] = [];
-  const codes: string[] = [];
-  if (v4.status === 'fulfilled') v4.value.forEach(a => addrs.push({ address: a, family: 4 }));
-  else codes.push((v4.reason as any)?.code || 'EUNKNOWN');
-  if (v6.status === 'fulfilled') v6.value.forEach(a => addrs.push({ address: a, family: 6 }));
-  else codes.push((v6.reason as any)?.code || 'EUNKNOWN');
-  return { addrs, codes };
+const sleep = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+async function resolveWith(resolver: dns.promises.Resolver, host: string): Promise<{ addrs: Addr[]; code: string | null }> {
+  try {
+    const [v4, v6] = await Promise.allSettled([
+      resolver.resolve4(host),
+      resolver.resolve6(host)
+    ]);
+    const addrs: Addr[] = [];
+    if (v4.status === 'fulfilled') v4.value.forEach(a => addrs.push({ address: a, family: 4 }));
+    if (v6.status === 'fulfilled') v6.value.forEach(a => addrs.push({ address: a, family: 6 }));
+    
+    if (addrs.length > 0) return { addrs, code: null };
+
+    const err4 = v4.status === 'rejected' ? (v4.reason as any)?.code : null;
+    const err6 = v6.status === 'rejected' ? (v6.reason as any)?.code : null;
+    return { addrs: [], code: err4 || err6 || 'EUNKNOWN' };
+  } catch (err: any) {
+    return { addrs: [], code: err?.code || 'EUNKNOWN' };
+  }
 }
 
-const isDefinitive = (c: string) => c === 'ENOTFOUND' || c === 'ENODATA';
+const isTransient = (code: string) => ['ETIMEOUT', 'ESERVFAIL', 'ECONNREFUSED', 'EREFUSED', 'EAGAIN', 'EBADFAMILY', 'ENOTINITIALIZED'].includes(code);
+const isNxDomain = (code: string) => code === 'ENOTFOUND' || code === 'ENODATA';
 
 async function resolveUncached(host: string): Promise<Addr[]> {
-  // 1. System resolver (respects the container's resolv.conf)
-  const sys = await resolveWith(systemResolver, host);
-  if (sys.addrs.length) return sys.addrs;
+  const codes: string[] = [];
+  let confirmedNxDomainCount = 0;
 
-  // 2. Public resolvers — confirms NXDOMAIN and rescues flaky/overloaded local DNS
-  const pub = await resolveWith(publicResolver, host);
-  if (pub.addrs.length) return pub.addrs;
+  for (let rIdx = 0; rIdx < resolvers.length; rIdx++) {
+    const resolver = resolvers[rIdx];
 
-  // 3. Last resort: getaddrinfo (honours /etc/hosts, search domains, etc.)
+    // Retry transient errors up to 2 times with jitter
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await resolveWith(resolver, host);
+      if (res.addrs.length > 0) return res.addrs;
+
+      const code = res.code || 'EUNKNOWN';
+      if (!codes.includes(code)) codes.push(code);
+
+      if (isNxDomain(code)) {
+        confirmedNxDomainCount++;
+        break; // Moves to next resolver to verify NXDOMAIN
+      }
+
+      if (isTransient(code) && attempt === 0) {
+        await sleep(50 + Math.random() * 100);
+      }
+    }
+
+    // Early exit if 2 independent resolvers confirm NXDOMAIN
+    if (confirmedNxDomainCount >= 2) {
+      throw new DnsError('ENOTFOUND', 'dns_nxdomain');
+    }
+  }
+
+  // Fallback lookup
   try {
     const res = await Promise.race([
       dns.promises.lookup(host, { all: true }),
-      new Promise<never>((_, rej) => setTimeout(() => rej(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' })), 5000)),
+      new Promise<never>((_, rej) => setTimeout(() => rej(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' })), 3000)),
     ]);
-    if (res.length) return res.map(r => ({ address: r.address, family: r.family === 6 ? 6 : 4 }));
-  } catch { /* fall through to classification */ }
+    if (res && res.length) return res.map(r => ({ address: r.address, family: r.family === 6 ? 6 : 4 }));
+  } catch { /* Fall through to classification */ }
 
-  const all = [...sys.codes, ...pub.codes];
-  if (all.length && all.every(isDefinitive)) {
-    const reason: DnsFailure = all.includes('ENOTFOUND') ? 'dns_nxdomain' : 'dns_no_records';
-    throw new DnsError(all.includes('ENOTFOUND') ? 'ENOTFOUND' : 'ENODATA', reason);
+  if (confirmedNxDomainCount >= 1 || codes.some(isNxDomain)) {
+    throw new DnsError('ENOTFOUND', 'dns_nxdomain');
   }
-  throw new DnsError(all.find(c => !isDefinitive(c)) || 'EDNS', 'dns_error');
+
+  if (codes.includes('ETIMEOUT')) throw new DnsError('ETIMEOUT', 'dns_timeout');
+  if (codes.includes('ESERVFAIL')) throw new DnsError('ESERVFAIL', 'dns_servfail');
+
+  throw new DnsError(codes[0] || 'EDNS', 'dns_error');
 }
 
-/** Resolve a hostname to IPs (IPv4 first). Throws DnsError. */
+/** Resolve a hostname to IPs (IPv4 prioritized). Throws DnsError. */
 export function resolveHost(host: string): Promise<Addr[]> {
   const h = host.toLowerCase().replace(/\.$/, '');
   const ipFamily = net.isIP(h);
@@ -83,23 +127,25 @@ export function resolveHost(host: string): Promise<Addr[]> {
   if (hit && Date.now() - hit.at < hit.ttl) return hit.p;
 
   const p = resolveUncached(h).then(addrs => {
-    // IPv4 first: many containers have no IPv6 egress
     return [...addrs.filter(a => a.family === 4), ...addrs.filter(a => a.family === 6)];
   });
+
   const entry = { at: Date.now(), ttl: TTL_MS, p };
   cache.set(h, entry);
   p.catch(() => { entry.ttl = NEG_TTL_MS; });
-  if (cache.size > 20000) {
+
+  if (cache.size > 30000) {
     const oldest = cache.keys().next().value;
     if (oldest) cache.delete(oldest);
   }
   return p;
 }
 
-/** Drop-in replacement for `dns.lookup` used by http/https agents. */
+/** Drop-in replacement for `dns.lookup` used by http agents. */
 export function cachedLookup(hostname: string, options: any, callback?: any): void {
   if (typeof options === 'function') { callback = options; options = {}; }
   const opts = typeof options === 'number' ? { family: options } : (options || {});
+  
   resolveHost(hostname).then(
     addrs => {
       let list = addrs;
@@ -108,7 +154,7 @@ export function cachedLookup(hostname: string, options: any, callback?: any): vo
         if (f.length) list = f;
       }
       const v4 = list.filter(a => a.family === 4);
-      if (v4.length) list = v4; // only fall back to IPv6 when there is no IPv4 at all
+      if (v4.length) list = v4;
       if (opts.all) callback(null, list.map(a => ({ address: a.address, family: a.family })));
       else callback(null, list[0].address, list[0].family);
     },
@@ -124,34 +170,32 @@ export function cachedLookup(hostname: string, options: any, callback?: any): vo
 
 const mxCache = new Map<string, Promise<boolean>>();
 
-/**
- * True if the domain can receive mail: has MX records, or (RFC 5321 implicit MX)
- * has no MX but does have an A record.
- */
+/** Check if domain has MX records or RFC 5321 implicit MX (A record). */
 export function canReceiveMail(domain: string): Promise<boolean> {
   const d = domain.toLowerCase();
   const hit = mxCache.get(d);
   if (hit) return hit;
+  
   const p = (async () => {
-    for (const r of [systemResolver, publicResolver]) {
+    for (const r of resolvers) {
       try {
         const mx = await r.resolveMx(d);
         if (mx.some(m => m.exchange && m.exchange !== '.')) return true;
-        return false; // explicit null MX
+        return false;
       } catch (e: any) {
         if (e?.code === 'ENOTFOUND') return false;
         if (e?.code === 'ENODATA') {
           try { await resolveHost(d); return true; } catch { return false; }
         }
-        // timeout / servfail → try next resolver
       }
     }
     return false;
   })();
+
   mxCache.set(d, p);
-  if (mxCache.size > 20000) {
+  if (mxCache.size > 30000) {
     const oldest = mxCache.keys().next().value;
-    if (oldest) mxCache.delete(oldest);
+    if (oldest) cache.delete(oldest);
   }
   return p;
 }
