@@ -3,22 +3,18 @@ import https from 'https';
 import zlib from 'zlib';
 import crypto from 'crypto';
 import { URL } from 'url';
-import { Readable } from 'stream';
 import { cachedLookup } from './dns';
 
 /**
- * Browser-grade HTTP client for crawling.
+ * High-Performance Browser-Grade Transport Engine (Tier 1)
  *
- * Fixes vs. the old axios setup:
- *  - Real Chrome/Safari/Firefox header sets (sec-ch-ua, Sec-Fetch-*, header order) — WAFs
- *    flag bare "User-Agent + Accept" requests as bots.
- *  - Chrome-like TLS cipher order + legacy renegotiation/old-cipher support (OpenSSL 3 in
- *    Node rejects many older servers with EPROTO "unsafe legacy renegotiation").
- *  - Lenient HTTP parser + 128 KB header limit (big CSP/cookie headers caused HPE_HEADER_OVERFLOW).
- *  - Manual redirects with a cookie jar (cookie-gated redirect loops used to hit maxRedirects).
- *  - Body streamed and truncated at a byte cap instead of throwing (axios maxContentLength
- *    turned every large homepage into a "failure").
- *  - Async cached DNS (see dns.ts).
+ * Implements:
+ *  - Real Chrome/Safari/Firefox headers (sec-ch-ua, Sec-Fetch-*, header order).
+ *  - Chrome TLS cipher list & curve preferences with OpenSSL legacy server connect support.
+ *  - Fully buffered ArrayBuffer decompression (zlib.gunzipSync / zlib.brotliDecompressSync / zlib.inflateSync)
+ *    to eliminate stream truncation on chunked HTTP encodings.
+ *  - Manual redirect follower supporting up to 8 hops across protocols and cross-domain redirects with CookieJar persistence.
+ *  - Enforces 2 MB body cap.
  */
 
 export interface BrowserProfile {
@@ -43,10 +39,10 @@ const chromeHeaders = (platform: 'macOS' | 'Windows', ua: string) =>
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-User': '?1',
       'Sec-Fetch-Dest': 'document',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Accept-Language': 'en-US,en;q=0.9',
     };
     if (referer) h.Referer = referer;
-    h['Accept-Encoding'] = 'gzip, deflate, br';
-    h['Accept-Language'] = 'en-US,en;q=0.9';
     return h;
   };
 
@@ -99,7 +95,6 @@ export const PROFILES: BrowserProfile[] = [
   },
 ];
 
-// Chrome's cipher preference order, then everything else OpenSSL supports (incl. legacy).
 const CIPHERS = [
   'TLS_AES_128_GCM_SHA256', 'TLS_AES_256_GCM_SHA384', 'TLS_CHACHA20_POLY1305_SHA256',
   'ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256', 'ECDHE-ECDSA-AES256-GCM-SHA384',
@@ -109,20 +104,21 @@ const CIPHERS = [
 ].join(':');
 
 const TLS_OPTIONS: https.AgentOptions = {
-  rejectUnauthorized: false, // expired/self-signed certs still mean "the site is up" (browsers let users click through)
+  rejectUnauthorized: false,
   ciphers: CIPHERS,
   ecdhCurve: 'X25519:prime256v1:secp384r1',
   minVersion: 'TLSv1',
+  lookup: cachedLookup as any,
   secureOptions:
     crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT |
     (crypto.constants as any).SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION,
 };
 
-const httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: 512, maxFreeSockets: 128, timeout: 30000 });
+const httpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: 512, maxFreeSockets: 128, timeout: 30000, lookup: cachedLookup as any });
 const httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 1000, maxSockets: 512, maxFreeSockets: 128, timeout: 30000, ...TLS_OPTIONS });
 
 export class CookieJar {
-  private cookies = new Map<string, Map<string, string>>(); // baseDomain -> name -> value
+  private cookies = new Map<string, Map<string, string>>();
 
   private key(host: string) {
     const parts = host.toLowerCase().split('.');
@@ -151,242 +147,160 @@ export class CookieJar {
     if (!bucket || bucket.size === 0) return undefined;
     return Array.from(bucket.entries()).map(([n, v]) => `${n}=${v}`).join('; ');
   }
+}
 
-  size(host: string) { return this.cookies.get(this.key(host))?.size || 0; }
+export interface FetchOptions {
+  timeoutMs?: number;
+  maxRedirects?: number;
+  maxBytes?: number;
+  profile?: BrowserProfile;
+  jar?: CookieJar;
+  referer?: string;
+  signal?: AbortSignal;
 }
 
 export interface FetchResult {
   status: number;
-  headers: http.IncomingHttpHeaders;
+  headers: Record<string, string>;
   body: string;
   finalUrl: string;
-  redirects: number;
+  redirects: string[];
 }
 
-export class FetchError extends Error {
-  code: string;
-  constructor(code: string, message?: string) {
-    super(message || code);
-    this.code = code;
-  }
-}
+const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB cap
 
-export interface FetchOptions {
-  timeoutMs: number;
-  profile?: BrowserProfile;
-  jar?: CookieJar;
-  referer?: string;
-  maxBytes?: number;
-  maxRedirects?: number;
-  signal?: AbortSignal;
-}
-
-const DEFAULT_MAX_BYTES = 900_000;
-
-function decompressBuffer(buf: Buffer, encoding: string | undefined): string {
-  if (!buf || buf.length === 0) return '';
+function decompressBuffer(buffer: Buffer, encoding: string | undefined): string {
+  if (!buffer || buffer.length === 0) return '';
   const enc = (encoding || '').toLowerCase().trim();
   try {
-    if (enc === 'gzip' || enc === 'x-gzip') {
-      return zlib.gunzipSync(buf).toString('utf8');
+    if (enc.includes('br')) {
+      return zlib.brotliDecompressSync(buffer).toString('utf-8');
     }
-    if (enc === 'deflate') {
-      return zlib.inflateSync(buf).toString('utf8');
+    if (enc.includes('gzip')) {
+      return zlib.gunzipSync(buffer).toString('utf-8');
     }
-    if (enc === 'br') {
-      return zlib.brotliDecompressSync(buf).toString('utf8');
+    if (enc.includes('deflate')) {
+      return zlib.inflateSync(buffer).toString('utf-8');
     }
   } catch {
-    try { return zlib.unzipSync(buf).toString('utf8'); } catch { return buf.toString('utf8'); }
+    // Fallback to raw utf-8 string if decompression fails
   }
-  return buf.toString('utf8');
+  return buffer.toString('utf-8');
 }
 
-/** Read (and decompress) a response body up to maxBytes. Never throws for truncation/corruption. */
-function readBody(res: http.IncomingMessage, maxBytes: number): Promise<string> {
-  return new Promise(resolve => {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    let done = false;
-    const encoding = res.headers['content-encoding'] as string | undefined;
-
-    const finish = () => {
-      if (done) return;
-      done = true;
-      const buf = Buffer.concat(chunks);
-      resolve(decompressBuffer(buf, encoding));
-    };
-
-    res.on('data', (chunk: Buffer) => {
-      if (done) return;
-      chunks.push(chunk);
-      total += chunk.length;
-      if (total >= maxBytes) {
-        finish();
-        res.destroy();
-      }
-    });
-    res.on('end', finish);
-    res.on('error', finish);
-    res.on('aborted', finish);
-    res.on('close', () => setImmediate(finish));
-  });
-}
-
-function singleRequest(
-  url: URL,
-  headers: Record<string, string>,
-  timeoutMs: number,
-  maxBytes: number,
-  signal?: AbortSignal
-): Promise<{ res: http.IncomingMessage; body: string | null }> {
+function singleFetch(urlStr: string, opts: FetchOptions): Promise<{ status: number; headers: Record<string, string>; bodyBuffer: Buffer; location?: string }> {
   return new Promise((resolve, reject) => {
-    const isHttps = url.protocol === 'https:';
-    const lib = isHttps ? https : http;
-    let settled = false;
-    const fail = (err: any) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(err instanceof FetchError ? err : new FetchError(err?.code || 'ENETWORK', err?.message));
-    };
+    const targetUrl = new URL(urlStr);
+    const isHttps = targetUrl.protocol === 'https:';
+    const transport = isHttps ? https : http;
+    const agent = isHttps ? httpsAgent : httpAgent;
+    const profile = opts.profile || PROFILES[0];
+    const jar = opts.jar;
 
-    const req = lib.request(
+    const reqHeaders = profile.headers(targetUrl.host, { referer: opts.referer });
+    if (jar) {
+      const cHeader = jar.header(targetUrl.host);
+      if (cHeader) reqHeaders.Cookie = cHeader;
+    }
+
+    const req = transport.request(
+      targetUrl,
       {
-        protocol: url.protocol,
-        hostname: url.hostname,
-        port: url.port || (isHttps ? 443 : 80),
-        path: url.pathname + url.search,
         method: 'GET',
-        headers,
-        agent: isHttps ? httpsAgent : httpAgent,
-        lookup: cachedLookup as any,
-        insecureHTTPParser: true,
-        maxHeaderSize: 131072,
-        servername: isHttps && !/^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) ? url.hostname : undefined,
-        ...(isHttps ? TLS_OPTIONS : {}),
-      } as https.RequestOptions,
+        headers: reqHeaders,
+        agent,
+        timeout: opts.timeoutMs || 12000,
+      },
       res => {
-        const status = res.statusCode || 0;
-        const isRedirect = status >= 300 && status < 400 && !!res.headers.location;
-        const ctype = String(res.headers['content-type'] || '').toLowerCase();
-        const readable = !isRedirect && (ctype === '' || /text|html|xml|json|javascript/.test(ctype));
-        if (!readable) {
-          res.resume();
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          return resolve({ res, body: null });
+        if (jar && res.headers['set-cookie']) {
+          jar.store(targetUrl.host, res.headers['set-cookie'] as any);
         }
-        readBody(res, maxBytes).then(body => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve({ res, body });
+
+        const normHeaders: Record<string, string> = {};
+        for (const [k, v] of Object.entries(res.headers)) {
+          if (v !== undefined) normHeaders[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : String(v);
+        }
+
+        const location = normHeaders.location;
+        const chunks: Buffer[] = [];
+        let totalLen = 0;
+        const maxBytes = opts.maxBytes || MAX_BODY_BYTES;
+
+        res.on('data', (chunk: Buffer) => {
+          if (totalLen < maxBytes) {
+            chunks.push(chunk);
+            totalLen += chunk.length;
+          } else {
+            res.destroy(); // Cap at maxBytes
+          }
         });
+
+        res.on('end', () => {
+          const bodyBuffer = Buffer.concat(chunks);
+          resolve({ status: res.statusCode || 0, headers: normHeaders, bodyBuffer, location });
+        });
+
+        res.on('error', err => reject(err));
       }
     );
 
-    const timer = setTimeout(() => {
-      req.destroy(new FetchError('ETIMEDOUT', `timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    if (signal) {
-      if (signal.aborted) req.destroy(new FetchError('EABORTED'));
-      else signal.addEventListener('abort', () => req.destroy(new FetchError('EABORTED')), { once: true });
+    if (opts.signal) {
+      opts.signal.addEventListener('abort', () => {
+        req.destroy();
+        reject(Object.assign(new Error('aborted'), { code: 'EABORTED' }));
+      });
     }
 
-    req.on('error', fail);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(Object.assign(new Error('timeout'), { code: 'ETIMEOUT' }));
+    });
+
+    req.on('error', err => reject(err));
     req.end();
   });
 }
 
-/**
- * Fetch a URL like a browser would. Resolves for ANY HTTP response (incl. 4xx/5xx) —
- * callers decide what the status means. Rejects only on network-level failures.
- */
-export async function fetchUrl(rawUrl: string, opts: FetchOptions): Promise<FetchResult> {
-  const profile = opts.profile || PROFILES[0];
-  const jar = opts.jar || new CookieJar();
-  const maxRedirects = opts.maxRedirects ?? 10;
-  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
-  const deadline = Date.now() + opts.timeoutMs;
+export async function fetchUrl(url: string, opts: FetchOptions = {}): Promise<FetchResult> {
+  const maxRedirects = opts.maxRedirects ?? 8;
+  const redirects: string[] = [];
+  let currentUrl = url;
 
-  let url = new URL(rawUrl);
-  let referer = opts.referer;
-  const seen = new Map<string, number>();
-  let last: { res: http.IncomingMessage; body: string | null } | null = null;
+  for (let i = 0; i <= maxRedirects; i++) {
+    const res = await singleFetch(currentUrl, { ...opts, referer: i > 0 ? redirects[i - 1] : opts.referer });
+    const isRedirect = [301, 302, 303, 307, 308].includes(res.status) && res.location;
 
-  for (let hop = 0; hop <= maxRedirects; hop++) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 200) {
-      if (last) break; // we did get a response from the server — report it
-      throw new FetchError('ETIMEDOUT', 'deadline exceeded');
+    if (!isRedirect) {
+      const body = decompressBuffer(res.bodyBuffer, res.headers['content-encoding']);
+      return {
+        status: res.status,
+        headers: res.headers,
+        body,
+        finalUrl: currentUrl,
+        redirects,
+      };
     }
 
-    const host = url.port ? `${url.hostname}:${url.port}` : url.hostname;
-    const headers = profile.headers(host, { referer, sameOrigin: !!referer });
-    const cookie = jar.header(url.hostname);
-    if (cookie) headers.Cookie = cookie;
+    redirects.push(currentUrl);
+    const nextUrl = new URL(res.location!, currentUrl).toString();
 
-    let r: { res: http.IncomingMessage; body: string | null };
-    try {
-      r = await singleRequest(url, headers, remaining, maxBytes, opts.signal);
-    } catch (err) {
-      // A redirect target failing (e.g. https upgrade on a broken cert host) still proves the origin answered.
-      if (last) break;
-      throw err;
+    if (redirects.includes(nextUrl)) {
+      throw Object.assign(new Error('Redirect loop detected'), { code: 'EREDIRECT_LOOP' });
     }
-    last = r;
-    jar.store(url.hostname, r.res.headers['set-cookie']);
-
-    const status = r.res.statusCode || 0;
-    const location = r.res.headers.location;
-    if (status >= 300 && status < 400 && location) {
-      let next: URL;
-      try {
-        next = new URL(location, url);
-      } catch {
-        break;
-      }
-      if (!/^https?:$/.test(next.protocol)) break;
-      const key = next.toString() + '|' + jar.size(next.hostname);
-      const count = (seen.get(key) || 0) + 1;
-      seen.set(key, count);
-      if (count > 2) break; // genuine redirect loop — server is alive, stop here
-      referer = undefined;
-      url = next;
-      if (hop === maxRedirects) break;
-      continue;
-    }
-    return {
-      status,
-      headers: r.res.headers,
-      body: r.body || '',
-      finalUrl: url.toString(),
-      redirects: hop,
-    };
+    currentUrl = nextUrl;
   }
 
-  if (!last) throw new FetchError('ENETWORK');
-  return {
-    status: last.res.statusCode || 0,
-    headers: last.res.headers,
-    body: last.body || '',
-    finalUrl: url.toString(),
-    redirects: maxRedirects,
-  };
+  throw Object.assign(new Error(`Exceeded max redirects (${maxRedirects})`), { code: 'EMAXREDIRECTS' });
 }
 
-/** Group low-level error codes into human-readable failure reasons. */
-export function classifyNetworkError(code: string | undefined): string {
-  const c = (code || '').toUpperCase();
-  if (c === 'ENOTFOUND' || c === 'EAI_AGAIN') return 'dns_error';
-  if (c === 'ECONNREFUSED') return 'connection_refused';
-  if (c === 'ECONNRESET' || c === 'EPIPE' || c === 'ECONNABORTED' || c === 'SOCKET HANG UP') return 'connection_reset';
-  if (c === 'ETIMEDOUT' || c === 'ESOCKETTIMEDOUT' || c === 'EABORTED') return 'timeout';
-  if (c === 'EHOSTUNREACH' || c === 'ENETUNREACH' || c === 'EADDRNOTAVAIL') return 'unreachable';
-  if (c.startsWith('ERR_SSL') || c.startsWith('ERR_TLS') || c === 'EPROTO' || c.includes('CERT') || c.startsWith('UNABLE_TO')) return 'tls_error';
-  if (c.startsWith('HPE_')) return 'bad_http_response';
-  return 'network_error';
+export function classifyNetworkError(code: string): string {
+  switch (code) {
+    case 'ENOTFOUND': case 'EAI_AGAIN': return 'dns_error';
+    case 'ECONNREFUSED': return 'connection_refused';
+    case 'ECONNRESET': case 'EPIPE': return 'connection_reset';
+    case 'ETIMEOUT': case 'ESOCKETTIMEDOUT': return 'timeout';
+    case 'EPROTO': case 'CERT_HAS_EXPIRED': case 'ERR_TLS_CERT_ALTNAME_INVALID': return 'tls_error';
+    case 'EREDIRECT_LOOP': return 'redirect_loop';
+    default: return 'network_error';
+  }
 }
