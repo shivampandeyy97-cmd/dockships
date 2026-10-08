@@ -460,19 +460,21 @@ app.get('/api/sellers/export', async (req, res) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.write('\uFEFF'); // UTF-8 BOM so Excel reads it correctly
-    res.write('Domain,Domain Status,Best Email\r\n');
+    res.write('Domain,Domain Status,Failure Reason,Best Email,Email Status\r\n');
 
     const PAGE = 2000;
     for (let offset = 0; offset < countRow.count; offset += PAGE) {
-      const rows = await allRows<{ domain: string; domain_status: string; best_email: string | null }>(
-        `SELECT domain, domain_status, best_email FROM dockships_sellers ${where} ORDER BY domain ASC LIMIT ? OFFSET ?`,
+      const rows = await allRows<{ domain: string; domain_status: string; failure_reason: string | null; best_email: string | null }>(
+        `SELECT domain, domain_status, failure_reason, best_email FROM dockships_sellers ${where} ORDER BY domain ASC LIMIT ? OFFSET ?`,
         [...params, PAGE, offset]
       );
       const chunk = rows
         .map(r => [
           csvCell(r.domain),
-          csvCell(r.domain_status === 'pass' ? 'Live' : r.domain_status === 'failed' ? 'Not Working' : 'Pending'),
-          csvCell(r.best_email || '')
+          csvCell(r.domain_status === 'pass' || r.domain_status === 'live' ? 'Live' : r.domain_status === 'failed' ? 'Failed' : 'Pending'),
+          csvCell(r.failure_reason || 'ok'),
+          csvCell(r.best_email || ''),
+          csvCell(r.best_email ? 'Found' : (r.domain_status === 'pass' || r.domain_status === 'live' ? 'No Email Found' : 'Blocked'))
         ].join(','))
         .join('\r\n');
       if (chunk) res.write(chunk + '\r\n');
